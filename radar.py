@@ -239,31 +239,29 @@ with zipfile.ZipFile(io.BytesIO(zip_data)) as archive:
             # MATERIAL CONFLICT
             # QuadClass 4 = Material Conflict
             # -----------------------------------------------
-
             if quad_class == "4":
-    material_conflict_events += 1
+                material_conflict_events += 1
 
-    material_conflict_debug.append({
-        "gdelt_id": global_event_id,
-        "event_code": event_code,
-        "base_code": event_base_code,
-        "root_code": event_root_code,
-        "goldstein": goldstein_scale,
-        "is_root": is_root_event,
-        "num_mentions": num_mentions,
-        "num_sources": num_sources,
-        "num_articles": num_articles,
-        "avg_tone": avg_tone,
-        "location": action_geo_fullname,
-        "country_code": action_geo_country,
-        "country": EUROPE_FIPS[action_geo_country],
-        "adm1": action_geo_adm1,
-        "latitude": action_geo_lat,
-        "longitude": action_geo_long,
-        "date_added": date_added,
-        "source_url": source_url,
-    })
-
+                material_conflict_debug.append({
+                    "gdelt_id": global_event_id,
+                    "event_code": event_code,
+                    "base_code": event_base_code,
+                    "root_code": event_root_code,
+                    "goldstein": goldstein_scale,
+                    "is_root": is_root_event,
+                    "num_mentions": num_mentions,
+                    "num_sources": num_sources,
+                    "num_articles": num_articles,
+                    "avg_tone": avg_tone,
+                    "location": action_geo_fullname,
+                    "country_code": action_geo_country,
+                    "country": EUROPE_FIPS[action_geo_country],
+                    "adm1": action_geo_adm1,
+                    "latitude": action_geo_lat,
+                    "longitude": action_geo_long,
+                    "date_added": date_added,
+                    "source_url": source_url,
+                })
             # -----------------------------------------------
             # RELEVÂNCIA PARA O NOSSO RADAR
             # -----------------------------------------------
