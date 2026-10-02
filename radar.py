@@ -1,26 +1,19 @@
 import json
+import time
 import urllib.parse
 import urllib.request
+import urllib.error
 from datetime import datetime, timezone
-
-# ============================================================
-# EUROPE CONFLICT RADAR - TEST v0.1
-# Primeiro teste: consultar GDELT
-# ============================================================
 
 GDELT_API = "https://api.gdeltproject.org/api/v2/doc/doc"
 
-# Pesquisa inicial deliberadamente ampla.
-# Depois vamos medir o ruído e melhorar os filtros.
-QUERY = (
-    '(missile OR drone OR explosion OR "air raid" OR '
-    '"air strike" OR shelling OR bombardment)'
-)
+# Começamos deliberadamente com uma consulta pequena.
+QUERY = '(missile OR "air raid" OR shelling)'
 
 params = {
     "query": QUERY,
     "mode": "ArtList",
-    "maxrecords": "50",
+    "maxrecords": "10",
     "format": "json",
     "sort": "DateDesc",
     "timespan": "1h",
@@ -29,54 +22,62 @@ params = {
 url = GDELT_API + "?" + urllib.parse.urlencode(params)
 
 print("=" * 70)
-print("EUROPE CONFLICT RADAR - GDELT TEST")
+print("EUROPE CONFLICT RADAR - GDELT TEST v0.2")
 print("Execution time:", datetime.now(timezone.utc).isoformat())
 print("=" * 70)
-print()
-print("Querying GDELT...")
-print()
 
-try:
-    request = urllib.request.Request(
-        url,
-        headers={"User-Agent": "EuropeConflictRadar/0.1"}
-    )
+max_attempts = 3
 
-    with urllib.request.urlopen(request, timeout=30) as response:
-        data = json.loads(response.read().decode("utf-8"))
+for attempt in range(1, max_attempts + 1):
 
-except Exception as error:
-    print("ERROR contacting GDELT:")
-    print(error)
-    raise
+    print(f"\nGDELT request - attempt {attempt}/{max_attempts}")
+
+    try:
+        request = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": "EuropeConflictRadar-Test/0.2"
+            }
+        )
+
+        with urllib.request.urlopen(request, timeout=60) as response:
+            raw = response.read().decode("utf-8")
+            data = json.loads(raw)
+
+        print("GDELT request successful.")
+        break
+
+    except urllib.error.HTTPError as error:
+
+        if error.code == 429:
+            print("GDELT rate limit (HTTP 429).")
+
+            if attempt < max_attempts:
+                wait_seconds = attempt * 30
+                print(f"Waiting {wait_seconds} seconds before retry...")
+                time.sleep(wait_seconds)
+                continue
+
+        raise
+
+else:
+    raise RuntimeError("GDELT did not respond successfully.")
 
 articles = data.get("articles", [])
 
-print(f"GDELT returned {len(articles)} articles.")
-print()
-
-if not articles:
-    print("No articles found in the selected period.")
+print(f"\nGDELT returned {len(articles)} articles.\n")
 
 for number, article in enumerate(articles, start=1):
 
-    title = article.get("title", "")
-    domain = article.get("domain", "")
-    country = article.get("sourcecountry", "")
-    language = article.get("language", "")
-    seen = article.get("seendate", "")
-    article_url = article.get("url", "")
-
     print("-" * 70)
     print(f"ARTICLE {number}")
-    print(f"Title: {title}")
-    print(f"Source: {domain}")
-    print(f"Source country: {country}")
-    print(f"Language: {language}")
-    print(f"GDELT seen date: {seen}")
-    print(f"URL: {article_url}")
+    print("Title:", article.get("title", ""))
+    print("Source:", article.get("domain", ""))
+    print("Source country:", article.get("sourcecountry", ""))
+    print("Language:", article.get("language", ""))
+    print("GDELT seen:", article.get("seendate", ""))
+    print("URL:", article.get("url", ""))
 
-print()
-print("=" * 70)
-print("END OF TEST")
+print("\n" + "=" * 70)
+print("TEST COMPLETED SUCCESSFULLY")
 print("=" * 70)
