@@ -171,6 +171,7 @@ total_events = 0
 europe_events = 0
 material_conflict_events = 0
 candidate_events = []
+material_conflict_debug = []
 
 with zipfile.ZipFile(io.BytesIO(zip_data)) as archive:
 
@@ -240,7 +241,28 @@ with zipfile.ZipFile(io.BytesIO(zip_data)) as archive:
             # -----------------------------------------------
 
             if quad_class == "4":
-                material_conflict_events += 1
+    material_conflict_events += 1
+
+    material_conflict_debug.append({
+        "gdelt_id": global_event_id,
+        "event_code": event_code,
+        "base_code": event_base_code,
+        "root_code": event_root_code,
+        "goldstein": goldstein_scale,
+        "is_root": is_root_event,
+        "num_mentions": num_mentions,
+        "num_sources": num_sources,
+        "num_articles": num_articles,
+        "avg_tone": avg_tone,
+        "location": action_geo_fullname,
+        "country_code": action_geo_country,
+        "country": EUROPE_FIPS[action_geo_country],
+        "adm1": action_geo_adm1,
+        "latitude": action_geo_lat,
+        "longitude": action_geo_long,
+        "date_added": date_added,
+        "source_url": source_url,
+    })
 
             # -----------------------------------------------
             # RELEVÂNCIA PARA O NOSSO RADAR
@@ -396,6 +418,64 @@ print(f"CANDIDATES BEFORE DEDUP:         {len(candidate_events)}")
 print(f"CANDIDATES AFTER DEDUP:          {len(final_events)}")
 print("=" * 76)
 
+# ============================================================
+# DEBUG: TODOS OS MATERIAL CONFLICT DA EUROPA
+# ============================================================
+
+print()
+print("=" * 76)
+print("DEBUG - ALL EUROPEAN MATERIAL CONFLICT EVENTS")
+print("=" * 76)
+
+if not material_conflict_debug:
+    print("No European QuadClass=4 events in this window.")
+
+for number, event in enumerate(material_conflict_debug, start=1):
+
+    print()
+    print("-" * 76)
+    print(f"MATERIAL CONFLICT {number}")
+
+    print("GDELT ID:", event["gdelt_id"])
+
+    print(
+        "CAMEO:",
+        event["event_code"],
+        "| Base:",
+        event["base_code"],
+        "| Root:",
+        event["root_code"],
+    )
+
+    print(
+        "Goldstein:",
+        event["goldstein"],
+        "| Root event:",
+        event["is_root"],
+    )
+
+    print("Country:", event["country"])
+    print("Location:", event["location"])
+    print("ADM1:", event["adm1"])
+
+    print(
+        "Coordinates:",
+        event["latitude"],
+        event["longitude"],
+    )
+
+    print(
+        "Mentions:",
+        event["num_mentions"],
+        "| Sources:",
+        event["num_sources"],
+        "| Articles:",
+        event["num_articles"],
+    )
+
+    print("Average tone:", event["avg_tone"])
+    print("GDELT DATEADDED:", event["date_added"])
+    print("Source URL:", event["source_url"])
 if not final_events:
     print("\nNo candidate armed-conflict events found in this 15-minute window.")
 
