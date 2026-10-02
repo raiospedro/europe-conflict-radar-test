@@ -1,83 +1,176 @@
-import json
-import time
-import urllib.parse
+import csv
+import io
 import urllib.request
-import urllib.error
+import zipfile
 from datetime import datetime, timezone
 
-GDELT_API = "https://api.gdeltproject.org/api/v2/doc/doc"
+# ============================================================
+# EUROPE CONFLICT RADAR
+# GDELT 2.0 Event Feed Test v0.3
+# ============================================================
 
-# Começamos deliberadamente com uma consulta pequena.
-QUERY = '(missile OR "air raid" OR shelling)'
-
-params = {
-    "query": QUERY,
-    "mode": "ArtList",
-    "maxrecords": "10",
-    "format": "json",
-    "sort": "DateDesc",
-    "timespan": "1h",
-}
-
-url = GDELT_API + "?" + urllib.parse.urlencode(params)
+LAST_UPDATE_URL = (
+    "http://data.gdeltproject.org/gdeltv2/lastupdate.txt"
+)
 
 print("=" * 70)
-print("EUROPE CONFLICT RADAR - GDELT TEST v0.2")
+print("EUROPE CONFLICT RADAR - GDELT EVENT FEED TEST v0.3")
 print("Execution time:", datetime.now(timezone.utc).isoformat())
 print("=" * 70)
 
-max_attempts = 3
+# ------------------------------------------------------------
+# 1. Discover latest GDELT files
+# ------------------------------------------------------------
 
-for attempt in range(1, max_attempts + 1):
+print("\nLooking for latest GDELT dataset...")
 
-    print(f"\nGDELT request - attempt {attempt}/{max_attempts}")
+request = urllib.request.Request(
+    LAST_UPDATE_URL,
+    headers={"User-Agent": "EuropeConflictRadar-Test/0.3"}
+)
 
-    try:
-        request = urllib.request.Request(
-            url,
-            headers={
-                "User-Agent": "EuropeConflictRadar-Test/0.2"
-            }
+with urllib.request.urlopen(request, timeout=60) as response:
+    last_update = response.read().decode("utf-8")
+
+export_url = None
+
+for line in last_update.splitlines():
+    parts = line.split()
+
+    if len(parts) >= 3:
+        file_url = parts[2]
+
+        if file_url.endswith(".export.CSV.zip"):
+            export_url = file_url
+            break
+
+if not export_url:
+    raise RuntimeError("Could not find latest GDELT export file.")
+
+print("Latest export:")
+print(export_url)
+
+# ------------------------------------------------------------
+# 2. Download latest 15-minute event file
+# ------------------------------------------------------------
+
+print("\nDownloading latest event dataset...")
+
+request = urllib.request.Request(
+    export_url,
+    headers={"User-Agent": "EuropeConflictRadar-Test/0.3"}
+)
+
+with urllib.request.urlopen(request, timeout=120) as response:
+    zip_data = response.read()
+
+print(f"Downloaded {len(zip_data):,} bytes.")
+
+# ------------------------------------------------------------
+# 3. Open ZIP and inspect events
+# ------------------------------------------------------------
+
+with zipfile.ZipFile(io.BytesIO(zip_data)) as archive:
+
+    filename = archive.namelist()[0]
+
+    print("Dataset inside ZIP:")
+    print(filename)
+
+    with archive.open(filename) as csv_file:
+
+        text_stream = io.TextIOWrapper(
+            csv_file,
+            encoding="utf-8",
+            errors="replace"
         )
 
-        with urllib.request.urlopen(request, timeout=60) as response:
-            raw = response.read().decode("utf-8")
-            data = json.loads(raw)
+        reader = csv.reader(text_stream, delimiter="\t")
 
-        print("GDELT request successful.")
-        break
+        total_events = 0
+        potential_conflict_events = []
 
-    except urllib.error.HTTPError as error:
+        for row in reader:
 
-        if error.code == 429:
-            print("GDELT rate limit (HTTP 429).")
+            total_events += 1
 
-            if attempt < max_attempts:
-                wait_seconds = attempt * 30
-                print(f"Waiting {wait_seconds} seconds before retry...")
-                time.sleep(wait_seconds)
+            # GDELT Event 2.0 has many columns.
+            # We initially use only a few stable fields.
+
+            if len(row) < 61:
                 continue
 
-        raise
+            global_event_id = row[0]
 
-else:
-    raise RuntimeError("GDELT did not respond successfully.")
+            event_code = row[26]
+            event_base_code = row[27]
+            event_root_code = row[28]
 
-articles = data.get("articles", [])
+            action_geo_type = row[49]
+            action_geo_fullname = row[50]
+            action_geo_country = row[51]
+            action_geo_adm1 = row[52]
 
-print(f"\nGDELT returned {len(articles)} articles.\n")
+            latitude = row[56]
+            longitude = row[57]
 
-for number, article in enumerate(articles, start=1):
+            date_added = row[59]
+            source_url = row[60]
 
+            # CAMEO root codes:
+            # 18 = assault
+            # 19 = fight
+            # 20 = unconventional mass violence
+            #
+            # For this first test we deliberately keep
+            # the filter broad.
+
+            if event_root_code in {"18", "19", "20"}:
+
+                potential_conflict_events.append({
+                    "id": global_event_id,
+                    "event_code": event_code,
+                    "root_code": event_root_code,
+                    "location": action_geo_fullname,
+                    "country": action_geo_country,
+                    "adm1": action_geo_adm1,
+                    "latitude": latitude,
+                    "longitude": longitude,
+                    "date_added": date_added,
+                    "source_url": source_url,
+                })
+
+print()
+print("=" * 70)
+print(f"TOTAL EVENTS IN LATEST 15-MINUTE FILE: {total_events}")
+print(
+    "POTENTIAL CONFLICT EVENTS:",
+    len(potential_conflict_events)
+)
+print("=" * 70)
+
+# Show maximum 30 events in GitHub log
+
+for number, event in enumerate(
+    potential_conflict_events[:30],
+    start=1
+):
+
+    print()
     print("-" * 70)
-    print(f"ARTICLE {number}")
-    print("Title:", article.get("title", ""))
-    print("Source:", article.get("domain", ""))
-    print("Source country:", article.get("sourcecountry", ""))
-    print("Language:", article.get("language", ""))
-    print("GDELT seen:", article.get("seendate", ""))
-    print("URL:", article.get("url", ""))
+    print(f"EVENT {number}")
+    print("GDELT ID:", event["id"])
+    print("CAMEO code:", event["event_code"])
+    print("Root code:", event["root_code"])
+    print("Location:", event["location"])
+    print("Country:", event["country"])
+    print("ADM1:", event["adm1"])
+    print("Latitude:", event["latitude"])
+    print("Longitude:", event["longitude"])
+    print("GDELT DATEADDED:", event["date_added"])
+    print("Source:", event["source_url"])
 
-print("\n" + "=" * 70)
-print("TEST COMPLETED SUCCESSFULLY")
+print()
+print("=" * 70)
+print("GDELT EVENT FEED TEST COMPLETED")
 print("=" * 70)
