@@ -1,11 +1,15 @@
-name: Europe Conflict Radar - Manual Test
+name: Europe Conflict Radar
 
 on:
   workflow_dispatch:
 
+  schedule:
+    - cron: "3,18,33,48 * * * *"
+
 jobs:
-  radar-test:
+  radar:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
       - name: Get repository
@@ -16,8 +20,8 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Test Supabase connection
+      - name: Run Europe Conflict Radar
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
-        run: python test_supabase.py
+        run: python radar.py
