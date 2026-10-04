@@ -1,29 +1,26 @@
 import csv
 import io
+import json
+import os
+import socket
+import time
+import urllib.error
 import urllib.request
 import zipfile
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 # ============================================================
-# EUROPE CONFLICT RADAR
-# GDELT 2.0 Event Feed Test v0.4
+# EUROPE CONFLICT RADAR v0.5
+# Experimental 7-day collection
 #
-# Objetivo:
-# - ler corretamente o schema GDELT 2.0
-# - limitar à Europa
-# - procurar violência/conflito potencialmente relevante
-# - reduzir ruído
-# - deduplicar artigos
-# - NÃO gravar ainda no Supabase
+# GDELT -> Europe -> STRICT/WATCH -> Supabase
 # ============================================================
 
 LAST_UPDATE_URL = "http://data.gdeltproject.org/gdeltv2/lastupdate.txt"
 
-# ------------------------------------------------------------
-# FIPS GEO country codes usados pelo GDELT.
-# Europa operacional do nosso projeto.
-# ------------------------------------------------------------
+SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
+SUPABASE_KEY = os.environ["SUPABASE_SECRET_KEY"]
 
 EUROPE_FIPS = {
     "AL": "Albania",
@@ -31,104 +28,165 @@ EUROPE_FIPS = {
     "AU": "Austria",
     "BE": "Belgium",
     "BK": "Bosnia and Herzegovina",
-    "BU": "Bulgaria",
     "BO": "Belarus",
-    "HR": "Croatia",
+    "BU": "Bulgaria",
     "CY": "Cyprus",
-    "EZ": "Czechia",
     "DA": "Denmark",
+    "EI": "Ireland",
     "EN": "Estonia",
+    "EZ": "Czechia",
     "FI": "Finland",
     "FR": "France",
     "GM": "Germany",
     "GR": "Greece",
+    "HR": "Croatia",
     "HU": "Hungary",
     "IC": "Iceland",
-    "EI": "Ireland",
     "IT": "Italy",
+    "KV": "Kosovo",
     "LG": "Latvia",
     "LH": "Lithuania",
+    "LO": "Slovakia",
+    "LS": "Liechtenstein",
     "LU": "Luxembourg",
-    "MK": "North Macedonia",
-    "MT": "Malta",
     "MD": "Moldova",
     "MJ": "Montenegro",
+    "MK": "North Macedonia",
+    "MN": "Monaco",
+    "MT": "Malta",
     "NL": "Netherlands",
     "NO": "Norway",
     "PL": "Poland",
     "PO": "Portugal",
-    "RO": "Romania",
     "RI": "Serbia",
-    "LO": "Slovakia",
+    "RO": "Romania",
     "SI": "Slovenia",
+    "SM": "San Marino",
     "SP": "Spain",
     "SW": "Sweden",
     "SZ": "Switzerland",
     "UK": "United Kingdom",
     "UP": "Ukraine",
     "VT": "Vatican City",
-    "SM": "San Marino",
-    "MN": "Monaco",
-    "LS": "Liechtenstein",
-    "KV": "Kosovo",
 }
 
-# ------------------------------------------------------------
-# CAMEO codes
-#
-# Não usamos simplesmente root 18/19/20.
-#
-# Procuramos inicialmente:
-# 190 = use conventional military force
-# 191 = impose blockade
-# 192 = occupy territory
-# 193 = fight with small arms/light weapons
-# 194 = fight with artillery/tanks
-# 195 = employ aerial weapons
-# 196 = violate ceasefire
-#
-# 20x = mass violence / unconventional mass violence
-#
-# Alguns códigos podem continuar a produzir ruído.
-# É precisamente isso que este teste pretende medir.
-# ------------------------------------------------------------
-
-HIGH_RELEVANCE_PREFIXES = (
-    "190",
-    "191",
-    "192",
-    "193",
-    "194",
-    "195",
-    "196",
-    "20",
+# High-interest CAMEO codes for the experiment.
+STRICT_PREFIXES = (
+    "190",  # conventional military force
+    "191",  # blockade
+    "192",  # occupy territory
+    "193",  # small arms/light weapons
+    "194",  # artillery/tanks
+    "195",  # aerial weapons
+    "196",  # ceasefire violation
+    "20",   # unconventional mass violence
 )
 
-# 15 = exhibit military/police force.
-# Não é necessariamente ataque, mas pode ser útil como sinal.
+# Signals worth keeping for evaluation even when not STRICT.
 WATCH_PREFIXES = (
     "152",  # increase military alert status
     "154",  # mobilize/increase armed forces
 )
 
-print("=" * 76)
-print("EUROPE CONFLICT RADAR - GDELT EVENT FEED v0.4")
-print("Execution time:", datetime.now(timezone.utc).isoformat())
-print("=" * 76)
+USER_AGENT = "EuropeConflictRadar-Test/0.5"
 
 # ============================================================
-# 1. DESCOBRIR O FICHEIRO MAIS RECENTE
+# NETWORK HELPERS
 # ============================================================
 
-print("\n[1/5] Looking for latest GDELT dataset...")
+def download(url, attempts=4, timeout=60):
+    """Download with retry/backoff for temporary GDELT/network failures."""
 
-request = urllib.request.Request(
+    last_error = None
+
+    for attempt in range(1, attempts + 1):
+        try:
+            request = urllib.request.Request(
+                url,
+                headers={"User-Agent": USER_AGENT},
+            )
+
+            with urllib.request.urlopen(
+                request,
+                timeout=timeout
+            ) as response:
+                return response.read()
+
+        except (
+            urllib.error.HTTPError,
+            urllib.error.URLError,
+            ConnectionResetError,
+            TimeoutError,
+            socket.timeout,
+        ) as error:
+
+            last_error = error
+
+            print(
+                f"Download attempt {attempt}/{attempts} failed:",
+                repr(error)
+            )
+
+            if attempt < attempts:
+                wait_seconds = attempt * 15
+                print(f"Retrying in {wait_seconds}s...")
+                time.sleep(wait_seconds)
+
+    raise RuntimeError(
+        f"Download failed after {attempts} attempts: {last_error}"
+    )
+
+
+def supabase_request(method, path, payload=None, prefer=None):
+    url = f"{SUPABASE_URL}/rest/v1/{path}"
+
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    if prefer:
+        headers["Prefer"] = prefer
+
+    data = None
+
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+
+    request = urllib.request.Request(
+        url,
+        data=data,
+        method=method,
+        headers=headers,
+    )
+
+    with urllib.request.urlopen(request, timeout=30) as response:
+        return response.status, response.read().decode("utf-8")
+
+
+# ============================================================
+# START
+# ============================================================
+
+run_started = datetime.now(timezone.utc)
+
+print("=" * 78)
+print("EUROPE CONFLICT RADAR v0.5")
+print("Run started:", run_started.isoformat())
+print("=" * 78)
+
+# ============================================================
+# 1. FIND LATEST GDELT EXPORT
+# ============================================================
+
+print("\n[1/6] Finding latest GDELT export...")
+
+last_update = download(
     LAST_UPDATE_URL,
-    headers={"User-Agent": "EuropeConflictRadar-Test/0.4"},
-)
-
-with urllib.request.urlopen(request, timeout=60) as response:
-    last_update = response.read().decode("utf-8")
+    attempts=4,
+    timeout=60
+).decode("utf-8")
 
 export_url = None
 
@@ -140,38 +198,34 @@ for line in last_update.splitlines():
         break
 
 if not export_url:
-    raise RuntimeError("Could not find latest GDELT export file.")
+    raise RuntimeError("Latest GDELT export not found.")
 
-print("Latest export:")
-print(export_url)
+print("Export:", export_url)
 
 # ============================================================
-# 2. DOWNLOAD
+# 2. DOWNLOAD DATASET
 # ============================================================
 
-print("\n[2/5] Downloading latest 15-minute dataset...")
+print("\n[2/6] Downloading dataset...")
 
-request = urllib.request.Request(
+zip_data = download(
     export_url,
-    headers={"User-Agent": "EuropeConflictRadar-Test/0.4"},
+    attempts=4,
+    timeout=120
 )
 
-with urllib.request.urlopen(request, timeout=120) as response:
-    zip_data = response.read()
-
-print(f"Downloaded: {len(zip_data):,} bytes")
+print(f"Downloaded {len(zip_data):,} bytes")
 
 # ============================================================
-# 3. PROCESSAMENTO
+# 3. PROCESS
 # ============================================================
 
-print("\n[3/5] Processing events...")
+print("\n[3/6] Processing Europe...")
 
 total_events = 0
 europe_events = 0
 material_conflict_events = 0
-candidate_events = []
-material_conflict_debug = []
+candidates = []
 
 with zipfile.ZipFile(io.BytesIO(zip_data)) as archive:
 
@@ -191,353 +245,255 @@ with zipfile.ZipFile(io.BytesIO(zip_data)) as archive:
 
             total_events += 1
 
-            # GDELT 2.0 export tem 61 colunas.
             if len(row) < 61:
                 continue
 
-            # ------------------------------------------------
-            # SCHEMA GDELT 2.0 - índices Python (zero based)
-            # ------------------------------------------------
-
-            global_event_id = row[0]
-
+            gdelt_id = row[0]
             is_root_event = row[25]
 
             event_code = row[26]
-            event_base_code = row[27]
-            event_root_code = row[28]
+            base_code = row[27]
+            root_code = row[28]
 
             quad_class = row[29]
-            goldstein_scale = row[30]
+            goldstein = row[30]
 
             num_mentions = row[31]
             num_sources = row[32]
             num_articles = row[33]
             avg_tone = row[34]
 
-            action_geo_type = row[51]
-            action_geo_fullname = row[52]
-            action_geo_country = row[53]
-            action_geo_adm1 = row[54]
-            action_geo_lat = row[56]
-            action_geo_long = row[57]
-            action_geo_feature_id = row[58]
+            geo_type = row[51]
+            location = row[52]
+            country_code = row[53]
+            adm1 = row[54]
+            latitude = row[56]
+            longitude = row[57]
 
-            date_added = row[59]
+            gdelt_date_added = row[59]
             source_url = row[60]
 
-            # -----------------------------------------------
-            # EUROPA
-            # -----------------------------------------------
-
-            if action_geo_country not in EUROPE_FIPS:
+            if country_code not in EUROPE_FIPS:
                 continue
 
             europe_events += 1
 
-            # -----------------------------------------------
-            # MATERIAL CONFLICT
-            # QuadClass 4 = Material Conflict
-            # -----------------------------------------------
             if quad_class == "4":
                 material_conflict_events += 1
 
-                material_conflict_debug.append({
-                    "gdelt_id": global_event_id,
-                    "event_code": event_code,
-                    "base_code": event_base_code,
-                    "root_code": event_root_code,
-                    "goldstein": goldstein_scale,
-                    "is_root": is_root_event,
-                    "num_mentions": num_mentions,
-                    "num_sources": num_sources,
-                    "num_articles": num_articles,
-                    "avg_tone": avg_tone,
-                    "location": action_geo_fullname,
-                    "country_code": action_geo_country,
-                    "country": EUROPE_FIPS[action_geo_country],
-                    "adm1": action_geo_adm1,
-                    "latitude": action_geo_lat,
-                    "longitude": action_geo_long,
-                    "date_added": date_added,
-                    "source_url": source_url,
-                })
-            # -----------------------------------------------
-            # RELEVÂNCIA PARA O NOSSO RADAR
-            # -----------------------------------------------
+            radar_class = None
 
-            relevance = None
-
-            if event_code.startswith(HIGH_RELEVANCE_PREFIXES):
-                relevance = "HIGH"
+            if event_code.startswith(STRICT_PREFIXES):
+                radar_class = "STRICT"
 
             elif event_code.startswith(WATCH_PREFIXES):
-                relevance = "WATCH"
+                radar_class = "WATCH"
 
-            if relevance is None:
+            # IMPORTANT:
+            # During the experiment we also retain European
+            # Material Conflict events that did not match STRICT.
+            elif quad_class == "4":
+                radar_class = "WATCH"
+
+            if radar_class is None:
                 continue
 
-            # Queremos localização utilizável.
-            if not action_geo_lat or not action_geo_long:
+            if not latitude or not longitude:
                 continue
 
-            # Conversão segura dos números.
-            try:
-                sources_int = int(num_sources or 0)
-            except ValueError:
-                sources_int = 0
+            def to_int(value):
+                try:
+                    return int(value or 0)
+                except ValueError:
+                    return 0
 
-            try:
-                articles_int = int(num_articles or 0)
-            except ValueError:
-                articles_int = 0
+            def to_float(value):
+                try:
+                    return float(value)
+                except (ValueError, TypeError):
+                    return None
 
-            try:
-                mentions_int = int(num_mentions or 0)
-            except ValueError:
-                mentions_int = 0
+            mentions = to_int(num_mentions)
+            sources = to_int(num_sources)
+            articles = to_int(num_articles)
 
-            try:
-                goldstein_float = float(goldstein_scale or 0)
-            except ValueError:
-                goldstein_float = 0.0
+            goldstein_value = to_float(goldstein)
+            tone_value = to_float(avg_tone)
+            lat_value = to_float(latitude)
+            lon_value = to_float(longitude)
 
-            # -----------------------------------------------
-            # SCORE EXPERIMENTAL
-            #
-            # NÃO significa "confirmado".
-            # Serve apenas para ordenar o que merece análise.
-            # -----------------------------------------------
+            if lat_value is None or lon_value is None:
+                continue
 
-            score = 0
+            # Experimental ranking only.
+            confidence = 0
 
-            if relevance == "HIGH":
-                score += 40
+            if radar_class == "STRICT":
+                confidence += 40
             else:
-                score += 15
+                confidence += 15
 
             if quad_class == "4":
-                score += 15
+                confidence += 15
 
             if is_root_event == "1":
-                score += 5
+                confidence += 5
 
-            if sources_int >= 2:
-                score += 10
+            if sources >= 2:
+                confidence += 10
 
-            if sources_int >= 3:
-                score += 10
+            if sources >= 3:
+                confidence += 10
 
-            if articles_int >= 3:
-                score += 5
+            if articles >= 3:
+                confidence += 5
 
-            if mentions_int >= 5:
-                score += 5
+            if mentions >= 5:
+                confidence += 5
 
-            if goldstein_float <= -7:
-                score += 10
+            if goldstein_value is not None and goldstein_value <= -7:
+                confidence += 10
 
-            candidate_events.append({
-                "gdelt_id": global_event_id,
-                "event_code": event_code,
-                "base_code": event_base_code,
-                "root_code": event_root_code,
-                "quad_class": quad_class,
-                "goldstein": goldstein_float,
-                "is_root": is_root_event,
-                "num_mentions": mentions_int,
-                "num_sources": sources_int,
-                "num_articles": articles_int,
-                "avg_tone": avg_tone,
-                "location": action_geo_fullname,
-                "country_code": action_geo_country,
-                "country": EUROPE_FIPS[action_geo_country],
-                "adm1": action_geo_adm1,
-                "geo_type": action_geo_type,
-                "latitude": action_geo_lat,
-                "longitude": action_geo_long,
-                "feature_id": action_geo_feature_id,
-                "date_added": date_added,
+            try:
+                source_domain = urlparse(source_url).netloc
+            except Exception:
+                source_domain = ""
+
+            candidates.append({
+                "gdelt_id": gdelt_id,
+                "event_key": f"GDELT_{gdelt_id}",
+                "event_type": "gdelt_candidate",
+                "status": "unverified",
+                "country": EUROPE_FIPS[country_code],
+                "country_code": country_code,
+                "region": adm1 or None,
+                "city": location or None,
+                "latitude": lat_value,
+                "longitude": lon_value,
+                "geo_precision": f"GDELT_TYPE_{geo_type}",
+                "confidence": confidence,
+                "headline": None,
+                "description": (
+                    "Automatically detected GDELT candidate. "
+                    "Location/event may be incorrect. "
+                    "Not an official warning."
+                ),
+                "official_confirmed": False,
+                "cameo_code": event_code,
+                "cameo_base_code": base_code,
+                "cameo_root_code": root_code,
+                "quad_class": to_int(quad_class),
+                "goldstein_scale": goldstein_value,
+                "num_mentions": mentions,
+                "num_sources": sources,
+                "num_articles": articles,
+                "avg_tone": tone_value,
                 "source_url": source_url,
-                "relevance": relevance,
-                "score": score,
+                "source_domain": source_domain,
+                "radar_class": radar_class,
+                "gdelt_date_added": gdelt_date_added,
             })
 
-# ============================================================
-# 4. DEDUPLICAÇÃO BÁSICA
-# ============================================================
-
-print("\n[4/5] Deduplicating...")
-
-# O mesmo artigo pode originar vários eventos GDELT.
-# Nesta primeira versão mantemos apenas o evento com maior
-# score por URL + localização + event code.
-
-deduplicated = {}
-
-for event in candidate_events:
-
-    key = (
-        event["source_url"],
-        event["location"],
-        event["event_code"],
-    )
-
-    existing = deduplicated.get(key)
-
-    if existing is None or event["score"] > existing["score"]:
-        deduplicated[key] = event
-
-final_events = list(deduplicated.values())
-
-# Ordenar:
-# score -> fontes -> artigos
-final_events.sort(
-    key=lambda x: (
-        x["score"],
-        x["num_sources"],
-        x["num_articles"],
-    ),
-    reverse=True,
-)
+print("Total GDELT events:", total_events)
+print("Europe:", europe_events)
+print("European Material Conflict:", material_conflict_events)
+print("Candidates:", len(candidates))
 
 # ============================================================
-# 5. RESULTADOS
+# 4. DEDUPLICATE CURRENT FILE
 # ============================================================
 
-print("\n[5/5] Results")
+print("\n[4/6] Deduplicating current run...")
 
-print()
-print("=" * 76)
-print(f"TOTAL GDELT EVENTS:              {total_events}")
-print(f"EVENTS LOCATED IN EUROPE:        {europe_events}")
-print(f"EUROPE MATERIAL CONFLICT:        {material_conflict_events}")
-print(f"CANDIDATES BEFORE DEDUP:         {len(candidate_events)}")
-print(f"CANDIDATES AFTER DEDUP:          {len(final_events)}")
-print("=" * 76)
+unique_candidates = {}
+
+for event in candidates:
+    unique_candidates[event["gdelt_id"]] = event
+
+candidates = list(unique_candidates.values())
+
+print("Unique candidates:", len(candidates))
 
 # ============================================================
-# DEBUG: TODOS OS MATERIAL CONFLICT DA EUROPA
+# 5. STORE IN SUPABASE
 # ============================================================
 
-print()
-print("=" * 76)
-print("DEBUG - ALL EUROPEAN MATERIAL CONFLICT EVENTS")
-print("=" * 76)
+print("\n[5/6] Writing candidates to Supabase...")
 
-if not material_conflict_debug:
-    print("No European QuadClass=4 events in this window.")
+inserted = 0
+already_present = 0
+failed = 0
 
-for number, event in enumerate(material_conflict_debug, start=1):
-
-    print()
-    print("-" * 76)
-    print(f"MATERIAL CONFLICT {number}")
-
-    print("GDELT ID:", event["gdelt_id"])
-
-    print(
-        "CAMEO:",
-        event["event_code"],
-        "| Base:",
-        event["base_code"],
-        "| Root:",
-        event["root_code"],
-    )
-
-    print(
-        "Goldstein:",
-        event["goldstein"],
-        "| Root event:",
-        event["is_root"],
-    )
-
-    print("Country:", event["country"])
-    print("Location:", event["location"])
-    print("ADM1:", event["adm1"])
-
-    print(
-        "Coordinates:",
-        event["latitude"],
-        event["longitude"],
-    )
-
-    print(
-        "Mentions:",
-        event["num_mentions"],
-        "| Sources:",
-        event["num_sources"],
-        "| Articles:",
-        event["num_articles"],
-    )
-
-    print("Average tone:", event["avg_tone"])
-    print("GDELT DATEADDED:", event["date_added"])
-    print("Source URL:", event["source_url"])
-if not final_events:
-    print("\nNo candidate armed-conflict events found in this 15-minute window.")
-
-for number, event in enumerate(final_events[:50], start=1):
-
-    print()
-    print("-" * 76)
-
-    print(
-        f"EVENT {number} | "
-        f"{event['relevance']} | "
-        f"SCORE {event['score']}"
-    )
-
-    print("GDELT ID:", event["gdelt_id"])
-
-    print(
-        "CAMEO:",
-        event["event_code"],
-        "| Base:",
-        event["base_code"],
-        "| Root:",
-        event["root_code"],
-    )
-
-    print(
-        "QuadClass:",
-        event["quad_class"],
-        "| Goldstein:",
-        event["goldstein"],
-        "| Root event:",
-        event["is_root"],
-    )
-
-    print("Country:", event["country"])
-    print("Location:", event["location"])
-    print("ADM1:", event["adm1"])
-
-    print(
-        "Coordinates:",
-        event["latitude"],
-        event["longitude"],
-    )
-
-    print(
-        "Mentions:",
-        event["num_mentions"],
-        "| Sources:",
-        event["num_sources"],
-        "| Articles:",
-        event["num_articles"],
-    )
-
-    print("GDELT DATEADDED:", event["date_added"])
+for event in candidates:
 
     try:
-        domain = urlparse(event["source_url"]).netloc
-    except Exception:
-        domain = ""
+        status, body = supabase_request(
+            "POST",
+            "events?on_conflict=gdelt_id",
+            payload=event,
+            prefer="resolution=ignore-duplicates,return=minimal",
+        )
 
-    print("Source domain:", domain)
-    print("Source URL:", event["source_url"])
+        if status in (200, 201, 204):
+            inserted += 1
+
+    except urllib.error.HTTPError as error:
+
+        error_body = error.read().decode("utf-8", errors="replace")
+
+        print(
+            "Supabase error for",
+            event["gdelt_id"],
+            error.code,
+            error_body,
+        )
+
+        failed += 1
+
+# ============================================================
+# 6. SUMMARY
+# ============================================================
+
+print("\n[6/6] Summary")
+
+print("=" * 78)
+print("TOTAL:", total_events)
+print("EUROPE:", europe_events)
+print("MATERIAL CONFLICT:", material_conflict_events)
+print("CANDIDATES:", len(candidates))
+print("SUPABASE ACCEPTED:", inserted)
+print("SUPABASE FAILED:", failed)
+print("=" * 78)
+
+for event in sorted(
+    candidates,
+    key=lambda item: item["confidence"],
+    reverse=True
+)[:20]:
+
+    print()
+    print(
+        event["radar_class"],
+        "| score",
+        event["confidence"],
+        "|",
+        event["country"],
+        "|",
+        event["city"],
+        "| CAMEO",
+        event["cameo_code"],
+    )
+
+    print(
+        "Sources:",
+        event["num_sources"],
+        "| Articles:",
+        event["num_articles"],
+        "|",
+        event["source_domain"],
+    )
+
+    print(event["source_url"])
 
 print()
-print("=" * 76)
-print("EUROPE CONFLICT RADAR v0.4 COMPLETED")
-print("=" * 76)
+print("RUN COMPLETED:", datetime.now(timezone.utc).isoformat())
