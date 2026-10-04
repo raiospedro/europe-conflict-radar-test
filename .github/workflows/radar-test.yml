@@ -16,5 +16,8 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Run GDELT radar
-        run: python radar.py
+      - name: Test Supabase connection
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+        run: python test_supabase.py
