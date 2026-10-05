@@ -1,0 +1,27 @@
+name: Europe Conflict Matcher
+
+on:
+  workflow_dispatch:
+
+  schedule:
+    - cron: "12,27,42,57 * * * *"
+
+jobs:
+  matcher:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Get repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Match official alerts with GDELT
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+        run: python matcher.py
