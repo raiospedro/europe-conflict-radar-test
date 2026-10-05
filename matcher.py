@@ -2,21 +2,43 @@ import json
 import math
 import os
 import re
+import unicodedata
+import urllib.error
 import urllib.parse
 import urllib.request
-import urllib.error
 from datetime import datetime, timezone
 
 SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
 SUPABASE_KEY = os.environ["SUPABASE_SECRET_KEY"]
 
-USER_AGENT = "EuropeConflictRadar-Matcher/0.2"
+USER_AGENT = "EuropeConflictRadar-Matcher/0.3"
 
 # ============================================================
-# RELEVANCE WORDS
+# MATCHER v0.3
+#
+# Philosophy:
+#
+# - Conservative matching.
+# - Geographic proximity alone is NOT enough.
+# - Time proximity alone is NOT enough.
+# - Semantic evidence is mandatory.
+# - Test/exercise alerts are excluded.
+# - Candidates > 200 km are rejected.
+# - Candidates > 100 km can never be probable.
+#
+# This script does NOT confirm real-world events.
+# It only measures possible correspondence between
+# official alerts and GDELT candidates.
 # ============================================================
 
-RELEVANT_WORDS = {
+
+# ============================================================
+# RELEVANT OFFICIAL ALERT VOCABULARY
+# ============================================================
+
+RELEVANT_TERMS = {
+
+    # English
     "explosion",
     "explosive",
     "bomb",
@@ -43,26 +65,322 @@ RELEVANT_WORDS = {
     "artillery",
     "shelling",
     "war",
-    "large-scale fire",
     "large scale fire",
+    "major fire",
+    "world war bomb",
 
     # German
     "bombe",
     "bomben",
-    "bombenentschärfung",
+    "bombenentscharfung",
     "anschlag",
     "terrorismus",
     "evakuierung",
-    "großbrand",
     "grossbrand",
+    "munition",
+    "sprengstoff",
 
     # French
-    "incendie",
+    "bombe",
+    "explosion",
     "attentat",
     "attaque",
-    "évacuation",
     "evacuation",
+    "incendie majeur",
+    "incendie important",
 }
+
+
+# ============================================================
+# ALERTS THAT MUST NOT BE MATCHED
+# ============================================================
+
+TEST_TERMS = {
+    "test",
+    "testing",
+    "exercise",
+    "drill",
+    "probealarm",
+    "ubung",
+    "uebung",
+    "essai",
+    "exercice",
+}
+
+
+# ============================================================
+# EVENT CONCEPT GROUPS
+#
+# At least one common concept is strong semantic evidence.
+# ============================================================
+
+CONCEPTS = {
+
+    "bomb": {
+        "bomb",
+        "bombing",
+        "bombe",
+        "bomben",
+        "bombenentscharfung",
+        "munition",
+        "ammunition",
+        "explosive",
+        "explosives",
+        "sprengstoff",
+        "world war bomb",
+    },
+
+    "explosion": {
+        "explosion",
+        "blast",
+        "detonation",
+        "explosive",
+    },
+
+    "missile": {
+        "missile",
+        "rocket",
+        "airstrike",
+        "air strike",
+        "shelling",
+        "artillery",
+    },
+
+    "drone": {
+        "drone",
+        "uav",
+        "unmanned aerial",
+    },
+
+    "attack": {
+        "attack",
+        "attacked",
+        "attentat",
+        "attaque",
+        "anschlag",
+        "armed",
+        "shooting",
+    },
+
+    "terror": {
+        "terror",
+        "terrorism",
+        "terrorist",
+        "anschlag",
+        "attentat",
+    },
+
+    "evacuation": {
+        "evacuation",
+        "evacuate",
+        "evacuated",
+        "evakuierung",
+    },
+
+    "fire": {
+        "large scale fire",
+        "major fire",
+        "grossbrand",
+        "incendie majeur",
+        "incendie important",
+    },
+
+    "chemical": {
+        "chemical",
+        "hazardous substance",
+        "toxic",
+        "radiological",
+        "nuclear",
+    },
+
+    "military": {
+        "military",
+        "armed forces",
+        "troops",
+        "artillery",
+        "war",
+    },
+}
+
+
+# ============================================================
+# GENERIC WORDS THAT SHOULD NOT CREATE A MATCH
+# ============================================================
+
+STOPWORDS = {
+    "alert",
+    "warning",
+    "official",
+    "update",
+    "cancel",
+    "cancelled",
+    "public",
+    "immediate",
+    "unknown",
+    "actual",
+    "germany",
+    "luxembourg",
+    "united",
+    "kingdom",
+    "city",
+    "district",
+    "area",
+    "region",
+    "state",
+    "from",
+    "with",
+    "this",
+    "that",
+    "into",
+    "near",
+    "over",
+    "under",
+    "after",
+    "before",
+    "during",
+    "large",
+    "scale",
+}
+
+
+# ============================================================
+# TEXT HELPERS
+# ============================================================
+
+def normalize_text(value):
+
+    if not value:
+        return ""
+
+    value = str(value)
+
+    # Remove HTML
+    value = re.sub(
+        r"<[^>]+>",
+        " ",
+        value
+    )
+
+    # Remove accents for comparison
+    value = unicodedata.normalize(
+        "NFKD",
+        value
+    )
+
+    value = "".join(
+        char
+        for char in value
+        if not unicodedata.combining(char)
+    )
+
+    value = value.lower()
+
+    value = re.sub(
+        r"[^a-z0-9\s\-]",
+        " ",
+        value
+    )
+
+    value = re.sub(
+        r"\s+",
+        " ",
+        value
+    )
+
+    return value.strip()
+
+
+def official_text(alert):
+
+    values = [
+        alert.get("headline"),
+        alert.get("description"),
+        alert.get("event_code"),
+        alert.get("area_description"),
+    ]
+
+    return normalize_text(
+        " ".join(
+            str(value or "")
+            for value in values
+        )
+    )
+
+
+def gdelt_text(event):
+
+    values = [
+        event.get("headline"),
+        event.get("description"),
+        event.get("city"),
+        event.get("region"),
+        event.get("country"),
+        event.get("source_domain"),
+        event.get("source_url"),
+    ]
+
+    return normalize_text(
+        " ".join(
+            str(value or "")
+            for value in values
+        )
+    )
+
+
+def contains_test_language(alert):
+
+    text = official_text(alert)
+
+    tokens = set(
+        re.findall(
+            r"\b[a-z0-9\-]+\b",
+            text
+        )
+    )
+
+    return any(
+        term in tokens
+        for term in TEST_TERMS
+    )
+
+
+def is_relevant(alert):
+
+    text = official_text(alert)
+
+    return any(
+        term in text
+        for term in RELEVANT_TERMS
+    )
+
+
+def detected_concepts(text):
+
+    found = set()
+
+    for concept, terms in CONCEPTS.items():
+
+        if any(
+            term in text
+            for term in terms
+        ):
+            found.add(concept)
+
+    return found
+
+
+def meaningful_tokens(text):
+
+    tokens = re.findall(
+        r"\b[a-z][a-z0-9\-]{3,}\b",
+        text
+    )
+
+    return {
+        token
+        for token in tokens
+        if token not in STOPWORDS
+    }
 
 
 # ============================================================
@@ -105,13 +423,6 @@ def supabase_insert(table, payload):
         "Content-Type": "application/json",
     }
 
-    # --------------------------------------------------------
-    # MATCHES COM GDELT
-    #
-    # A combinação official_alert_id + gdelt_event_id
-    # é UNIQUE na base.
-    # --------------------------------------------------------
-
     if (
         table == "event_matches"
         and payload.get("gdelt_event_id") is not None
@@ -129,9 +440,7 @@ def supabase_insert(table, payload):
 
     else:
 
-        headers["Prefer"] = (
-            "return=minimal"
-        )
+        headers["Prefer"] = "return=minimal"
 
     request = urllib.request.Request(
         url,
@@ -197,7 +506,7 @@ def parse_gdelt_time(value):
 
 
 # ============================================================
-# DISTANCE
+# GEO
 # ============================================================
 
 def haversine(
@@ -236,10 +545,6 @@ def haversine(
     return radius * c
 
 
-# ============================================================
-# GEOMETRY
-# ============================================================
-
 def collect_coordinates(
     value,
     result
@@ -247,7 +552,6 @@ def collect_coordinates(
 
     if isinstance(value, dict):
 
-        # Standard GeoJSON
         if "coordinates" in value:
 
             collect_coordinates(
@@ -255,15 +559,14 @@ def collect_coordinates(
                 result
             )
 
-        # LU-Alert polygons stored as CAP strings
+        # LU-Alert CAP polygons:
+        # "latitude,longitude latitude,longitude..."
         if "polygons" in value:
 
-            polygons = value.get(
+            for polygon in value.get(
                 "polygons",
                 []
-            )
-
-            for polygon in polygons:
+            ):
 
                 if not isinstance(
                     polygon,
@@ -303,8 +606,8 @@ def collect_coordinates(
 
     elif isinstance(value, list):
 
-        # Standard GeoJSON coordinate pair:
-        # [longitude, latitude]
+        # Standard GeoJSON:
+        # longitude, latitude
         if (
             len(value) >= 2
             and isinstance(
@@ -317,13 +620,8 @@ def collect_coordinates(
             )
         ):
 
-            lon = float(
-                value[0]
-            )
-
-            lat = float(
-                value[1]
-            )
+            lon = float(value[0])
+            lat = float(value[1])
 
             if (
                 -90 <= lat <= 90
@@ -390,129 +688,116 @@ def representative_point(
 
 
 # ============================================================
-# TEXT
+# SEMANTIC COMPARISON
 # ============================================================
 
-def normalize_text(value):
-
-    if not value:
-        return ""
-
-    value = value.lower()
-
-    # remove HTML
-    value = re.sub(
-        r"<[^>]+>",
-        " ",
-        value
-    )
-
-    value = re.sub(
-        r"\s+",
-        " ",
-        value
-    )
-
-    return value.strip()
-
-
-def official_text(alert):
-
-    values = [
-        alert.get("headline"),
-        alert.get("description"),
-        alert.get("event_code"),
-        alert.get("area_description"),
-    ]
-
-    return normalize_text(
-        " ".join(
-            str(value or "")
-            for value in values
-        )
-    )
-
-
-def is_relevant(alert):
-
-    text = official_text(
-        alert
-    )
-
-    return any(
-        word in text
-        for word in RELEVANT_WORDS
-    )
-
-
-def text_score(
-    official_alert,
-    gdelt_event
+def semantic_analysis(
+    official,
+    gdelt
 ):
 
-    official = official_text(
-        official_alert
+    official_content = official_text(
+        official
     )
 
-    gdelt = normalize_text(
+    gdelt_content = gdelt_text(
+        gdelt
+    )
+
+    official_concepts = detected_concepts(
+        official_content
+    )
+
+    gdelt_concepts = detected_concepts(
+        gdelt_content
+    )
+
+    common_concepts = (
+        official_concepts
+        &
+        gdelt_concepts
+    )
+
+    official_tokens = meaningful_tokens(
+        official_content
+    )
+
+    gdelt_tokens = meaningful_tokens(
+        gdelt_content
+    )
+
+    common_tokens = (
+        official_tokens
+        &
+        gdelt_tokens
+    )
+
+    # Location terms are especially useful.
+    location_text = normalize_text(
         " ".join([
-            gdelt_event.get(
-                "city"
+            official.get(
+                "area_description"
             ) or "",
-            gdelt_event.get(
-                "region"
-            ) or "",
-            gdelt_event.get(
-                "country"
-            ) or "",
-            gdelt_event.get(
-                "source_domain"
+            official.get(
+                "headline"
             ) or "",
         ])
     )
 
-    score = 0
+    location_tokens = meaningful_tokens(
+        location_text
+    )
 
-    # Country agreement
-    official_country = normalize_text(
-        official_alert.get(
-            "country"
+    common_location_tokens = (
+        location_tokens
+        &
+        gdelt_tokens
+    )
+
+    semantic_score = 0
+
+    if common_concepts:
+        semantic_score += 35
+
+    if common_location_tokens:
+        semantic_score += min(
+            len(
+                common_location_tokens
+            ) * 15,
+            30
         )
+
+    # Other meaningful overlap.
+    other_common = (
+        common_tokens
+        -
+        common_location_tokens
     )
 
-    gdelt_country = normalize_text(
-        gdelt_event.get(
-            "country"
-        )
+    semantic_score += min(
+        len(other_common) * 5,
+        15
     )
 
-    if (
-        official_country
-        and
-        official_country == gdelt_country
-    ):
-        score += 20
-
-    # Location/region words
-    tokens = set(
-        re.findall(
-            r"\b[a-zA-ZÀ-ÿ]{4,}\b",
-            official
-        )
+    strong_semantic = (
+        bool(common_concepts)
+        or
+        bool(common_location_tokens)
     )
 
-    matches = sum(
-        1
-        for token in tokens
-        if token in gdelt
-    )
-
-    score += min(
-        matches * 5,
-        20
-    )
-
-    return score
+    return {
+        "score": semantic_score,
+        "strong": strong_semantic,
+        "common_concepts": sorted(
+            common_concepts
+        ),
+        "common_location_tokens": sorted(
+            common_location_tokens
+        ),
+        "common_tokens": sorted(
+            common_tokens
+        ),
+    }
 
 
 # ============================================================
@@ -520,7 +805,7 @@ def text_score(
 # ============================================================
 
 print("=" * 78)
-print("EUROPE CONFLICT RADAR MATCHER v0.2")
+print("EUROPE CONFLICT RADAR MATCHER v0.3")
 print(
     "Execution:",
     datetime.now(
@@ -559,28 +844,60 @@ print(
 
 
 # ============================================================
-# FILTER OFFICIAL ALERTS
+# OFFICIAL FILTERING
 # ============================================================
 
-relevant_official = [
-    alert
-    for alert in official_alerts
-    if is_relevant(alert)
-]
+relevant_official = []
+
+test_alerts_excluded = 0
+
+for alert in official_alerts:
+
+    if contains_test_language(
+        alert
+    ):
+
+        test_alerts_excluded += 1
+        continue
+
+    if is_relevant(
+        alert
+    ):
+
+        relevant_official.append(
+            alert
+        )
 
 print(
     "Relevant official alerts:",
     len(relevant_official)
 )
 
+print(
+    "Test/exercise alerts excluded:",
+    test_alerts_excluded
+)
+
+
+# ============================================================
+# COUNTERS
+# ============================================================
+
+matches_accepted = 0
+no_candidates_created = 0
+already_recorded = 0
+
+rejected_distance = 0
+rejected_semantic = 0
+rejected_time = 0
+
+probable_matches = 0
+possible_matches = 0
+
 
 # ============================================================
 # MATCHING
 # ============================================================
-
-matches_created = 0
-unmatched_created = 0
-already_recorded = 0
 
 for official in relevant_official:
 
@@ -599,32 +916,38 @@ for official in relevant_official:
         )
     )
 
-    candidates = []
+    evaluated = []
+
+    rejection_samples = []
 
     for gdelt in gdelt_events:
 
-        # ----------------------------------------------------
-        # COUNTRY MUST MATCH
-        # ----------------------------------------------------
+        # ====================================================
+        # COUNTRY GATE
+        # ====================================================
+
+        official_country = normalize_text(
+            official.get(
+                "country"
+            )
+        )
+
+        gdelt_country = normalize_text(
+            gdelt.get(
+                "country"
+            )
+        )
 
         if (
-            normalize_text(
-                official.get(
-                    "country"
-                )
-            )
-            !=
-            normalize_text(
-                gdelt.get(
-                    "country"
-                )
-            )
+            not official_country
+            or
+            official_country != gdelt_country
         ):
             continue
 
-        # ----------------------------------------------------
-        # GDELT TIME
-        # ----------------------------------------------------
+        # ====================================================
+        # TIME GATE
+        # ====================================================
 
         gdelt_time = parse_gdelt_time(
             gdelt.get(
@@ -640,46 +963,24 @@ for official in relevant_official:
             - official_time
         ).total_seconds() / 60
 
-        # Candidate window:
-        # 2 hours before official
-        # 6 hours after official
+        # v0.3:
+        # max 90 min before official alert,
+        # max 240 min after.
 
         if (
-            latency < -120
+            latency < -90
             or
-            latency > 360
+            latency > 240
         ):
+
+            rejected_time += 1
             continue
 
-        # ----------------------------------------------------
-        # TIME SCORE
-        # ----------------------------------------------------
-
-        abs_latency = abs(
-            latency
-        )
-
-        if abs_latency <= 15:
-            time_points = 35
-
-        elif abs_latency <= 30:
-            time_points = 30
-
-        elif abs_latency <= 60:
-            time_points = 20
-
-        elif abs_latency <= 120:
-            time_points = 10
-
-        else:
-            time_points = 5
-
-        # ----------------------------------------------------
-        # DISTANCE SCORE
-        # ----------------------------------------------------
+        # ====================================================
+        # DISTANCE
+        # ====================================================
 
         distance = None
-        distance_points = 0
 
         if (
             official_point
@@ -710,401 +1011,5 @@ for official in relevant_official:
                     ),
                 )
 
-                if distance <= 10:
-                    distance_points = 35
-
-                elif distance <= 25:
-                    distance_points = 30
-
-                elif distance <= 50:
-                    distance_points = 20
-
-                elif distance <= 100:
-                    distance_points = 10
-
             except Exception:
-                distance = None
-
-        # ----------------------------------------------------
-        # TEXT SCORE
-        # ----------------------------------------------------
-
-        text_points = text_score(
-            official,
-            gdelt
-        )
-
-        total_score = (
-            time_points
-            +
-            distance_points
-            +
-            text_points
-        )
-
-        candidates.append({
-            "event": gdelt,
-            "latency": latency,
-            "distance": distance,
-            "time_score": time_points,
-            "distance_score": distance_points,
-            "text_score": text_points,
-            "score": total_score,
-        })
-
-    # Best score first
-    candidates.sort(
-        key=lambda item: item[
-            "score"
-        ],
-        reverse=True
-    )
-
-    # ========================================================
-    # CANDIDATE FOUND
-    # ========================================================
-
-    if candidates:
-
-        best = candidates[0]
-
-        if best["score"] >= 50:
-
-            classification = (
-                "probable_match"
-            )
-
-        elif best["score"] >= 30:
-
-            classification = (
-                "possible_match"
-            )
-
-        else:
-
-            classification = (
-                "weak_match"
-            )
-
-        payload = {
-
-            "official_alert_id":
-                official["id"],
-
-            "gdelt_event_id":
-                best["event"]["id"],
-
-            "official_country":
-                official.get(
-                    "country"
-                ),
-
-            "official_time":
-                official.get(
-                    "issued_at"
-                ),
-
-            "gdelt_time":
-                best["event"].get(
-                    "first_detected_at"
-                ),
-
-            "latency_minutes":
-                round(
-                    best["latency"],
-                    2
-                ),
-
-            "distance_km":
-                (
-                    round(
-                        best["distance"],
-                        2
-                    )
-                    if best["distance"]
-                    is not None
-                    else None
-                ),
-
-            "time_score":
-                best["time_score"],
-
-            "distance_score":
-                best["distance_score"],
-
-            "text_score":
-                best["text_score"],
-
-            "match_score":
-                best["score"],
-
-            "classification":
-                classification,
-
-            "notes":
-                (
-                    "Experimental automatic match. "
-                    "Not manually verified."
-                ),
-        }
-
-        try:
-
-            status = supabase_insert(
-                "event_matches",
-                payload
-            )
-
-            if status in (
-                200,
-                201,
-                204
-            ):
-
-                matches_created += 1
-
-            print()
-            print(
-                classification.upper(),
-                "|",
-                official.get(
-                    "headline"
-                )
-            )
-
-            print(
-                "Official:",
-                official.get(
-                    "issued_at"
-                )
-            )
-
-            print(
-                "GDELT:",
-                best["event"].get(
-                    "gdelt_date_added"
-                )
-            )
-
-            print(
-                "Latency:",
-                round(
-                    best["latency"],
-                    1
-                ),
-                "minutes"
-            )
-
-            print(
-                "Distance:",
-                (
-                    round(
-                        best["distance"],
-                        1
-                    )
-                    if best["distance"]
-                    is not None
-                    else "unknown"
-                ),
-                "km"
-            )
-
-            print(
-                "Score:",
-                best["score"]
-            )
-
-            print(
-                "GDELT source:",
-                best["event"].get(
-                    "source_url"
-                )
-            )
-
-        except urllib.error.HTTPError as error:
-
-            print(
-                "MATCH INSERT ERROR:",
-                error.code,
-                error.read().decode(
-                    "utf-8",
-                    errors="replace"
-                )
-            )
-
-        except Exception as error:
-
-            print(
-                "MATCH INSERT ERROR:",
-                error
-            )
-
-    # ========================================================
-    # NO GDELT CANDIDATE
-    # ========================================================
-
-    else:
-
-        # Check whether we already recorded
-        # a no_candidate result for this official alert.
-
-        params = (
-            "select=id"
-            f"&official_alert_id=eq.{official['id']}"
-            "&gdelt_event_id=is.null"
-            "&limit=1"
-        )
-
-        try:
-
-            existing = supabase_get(
-                "event_matches",
-                params
-            )
-
-        except Exception as error:
-
-            print(
-                "NO-CANDIDATE LOOKUP ERROR:",
-                error
-            )
-
-            continue
-
-        if existing:
-
-            already_recorded += 1
-            continue
-
-        payload = {
-
-            "official_alert_id":
-                official["id"],
-
-            "gdelt_event_id":
-                None,
-
-            "official_country":
-                official.get(
-                    "country"
-                ),
-
-            "official_time":
-                official.get(
-                    "issued_at"
-                ),
-
-            "gdelt_time":
-                None,
-
-            "latency_minutes":
-                None,
-
-            "distance_km":
-                None,
-
-            "time_score":
-                0,
-
-            "distance_score":
-                0,
-
-            "text_score":
-                0,
-
-            "match_score":
-                0,
-
-            "classification":
-                "no_candidate",
-
-            "notes":
-                (
-                    "No GDELT candidate found "
-                    "within -120/+360 minutes."
-                ),
-        }
-
-        try:
-
-            status = supabase_insert(
-                "event_matches",
-                payload
-            )
-
-            if status in (
-                200,
-                201,
-                204
-            ):
-
-                unmatched_created += 1
-
-        except urllib.error.HTTPError as error:
-
-            print(
-                "NO-CANDIDATE INSERT ERROR:",
-                error.code,
-                error.read().decode(
-                    "utf-8",
-                    errors="replace"
-                )
-            )
-
-        except Exception as error:
-
-            print(
-                "NO-CANDIDATE INSERT ERROR:",
-                error
-            )
-
-
-# ============================================================
-# SUMMARY
-# ============================================================
-
-print()
-print("=" * 78)
-print("MATCHER v0.2 SUMMARY")
-print("=" * 78)
-
-print(
-    "OFFICIAL ALERTS:",
-    len(official_alerts)
-)
-
-print(
-    "GDELT CANDIDATES:",
-    len(gdelt_events)
-)
-
-print(
-    "RELEVANT OFFICIAL ALERTS:",
-    len(relevant_official)
-)
-
-print(
-    "MATCHES ACCEPTED:",
-    matches_created
-)
-
-print(
-    "NO-CANDIDATES CREATED:",
-    unmatched_created
-)
-
-print(
-    "ALREADY RECORDED:",
-    already_recorded
-)
-
-print("=" * 78)
-
-print(
-    "MATCHER COMPLETED:",
-    datetime.now(
-        timezone.utc
-    ).isoformat()
-)
-
-print("=" * 78)
+                distance
