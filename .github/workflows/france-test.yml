@@ -1,0 +1,20 @@
+name: France FR-Alert Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  france-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Get repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Probe FR-Alert
+        run: python france_probe.py
