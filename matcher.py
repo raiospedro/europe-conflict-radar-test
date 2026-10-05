@@ -4,15 +4,16 @@ import os
 import re
 import urllib.parse
 import urllib.request
+import urllib.error
 from datetime import datetime, timezone
 
 SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
 SUPABASE_KEY = os.environ["SUPABASE_SECRET_KEY"]
 
-USER_AGENT = "EuropeConflictRadar-Matcher/0.1"
+USER_AGENT = "EuropeConflictRadar-Matcher/0.2"
 
 # ============================================================
-# EXPERIMENTAL RELEVANCE WORDS
+# RELEVANCE WORDS
 # ============================================================
 
 RELEVANT_WORDS = {
@@ -44,26 +45,24 @@ RELEVANT_WORDS = {
     "war",
     "large-scale fire",
     "large scale fire",
-}
 
-# Algumas equivalências alemãs/francesas úteis.
-RELEVANT_WORDS.update({
+    # German
     "bombe",
     "bomben",
     "bombenentschärfung",
-    "explosion",
     "anschlag",
-    "terror",
     "terrorismus",
     "evakuierung",
     "großbrand",
     "grossbrand",
+
+    # French
     "incendie",
     "attentat",
     "attaque",
     "évacuation",
     "evacuation",
-})
+}
 
 
 # ============================================================
@@ -98,26 +97,7 @@ def supabase_get(table, params=""):
 
 def supabase_insert(table, payload):
 
-    if table == "event_matches":
-
-        if payload.get("gdelt_event_id") is not None:
-            conflict = "official_alert_id,gdelt_event_id"
-        else:
-            conflict = None
-
-    else:
-        conflict = None
-
     url = f"{SUPABASE_URL}/rest/v1/{table}"
-
-    if conflict:
-        url += (
-            "?on_conflict="
-            + urllib.parse.quote(
-                conflict,
-                safe=","
-            )
-        )
 
     headers = {
         "apikey": SUPABASE_KEY,
@@ -125,17 +105,39 @@ def supabase_insert(table, payload):
         "Content-Type": "application/json",
     }
 
-    if conflict:
+    # --------------------------------------------------------
+    # MATCHES COM GDELT
+    #
+    # A combinação official_alert_id + gdelt_event_id
+    # é UNIQUE na base.
+    # --------------------------------------------------------
+
+    if (
+        table == "event_matches"
+        and payload.get("gdelt_event_id") is not None
+    ):
+
+        url += (
+            "?on_conflict="
+            "official_alert_id,gdelt_event_id"
+        )
+
         headers["Prefer"] = (
             "resolution=ignore-duplicates,"
             "return=minimal"
         )
+
     else:
-        headers["Prefer"] = "return=minimal"
+
+        headers["Prefer"] = (
+            "return=minimal"
+        )
 
     request = urllib.request.Request(
         url,
-        data=json.dumps(payload).encode("utf-8"),
+        data=json.dumps(
+            payload
+        ).encode("utf-8"),
         method="POST",
         headers=headers,
     )
@@ -146,6 +148,7 @@ def supabase_insert(table, payload):
     ) as response:
 
         return response.status
+
 
 # ============================================================
 # TIME
@@ -159,7 +162,10 @@ def parse_time(value):
     try:
 
         dt = datetime.fromisoformat(
-            value.replace("Z", "+00:00")
+            value.replace(
+                "Z",
+                "+00:00"
+            )
         )
 
         return dt.astimezone(
@@ -191,7 +197,7 @@ def parse_gdelt_time(value):
 
 
 # ============================================================
-# GEO
+# DISTANCE
 # ============================================================
 
 def haversine(
@@ -230,11 +236,18 @@ def haversine(
     return radius * c
 
 
-def collect_coordinates(value, result):
+# ============================================================
+# GEOMETRY
+# ============================================================
+
+def collect_coordinates(
+    value,
+    result
+):
 
     if isinstance(value, dict):
 
-        # GeoJSON coordinates
+        # Standard GeoJSON
         if "coordinates" in value:
 
             collect_coordinates(
@@ -242,7 +255,7 @@ def collect_coordinates(value, result):
                 result
             )
 
-        # LU-Alert custom storage
+        # LU-Alert polygons stored as CAP strings
         if "polygons" in value:
 
             polygons = value.get(
@@ -282,6 +295,7 @@ def collect_coordinates(value, result):
                 "coordinates",
                 "polygons"
             ):
+
                 collect_coordinates(
                     item,
                     result
@@ -289,7 +303,7 @@ def collect_coordinates(value, result):
 
     elif isinstance(value, list):
 
-        # GeoJSON coordinate pair:
+        # Standard GeoJSON coordinate pair:
         # [longitude, latitude]
         if (
             len(value) >= 2
@@ -303,15 +317,25 @@ def collect_coordinates(value, result):
             )
         ):
 
-            lon = float(value[0])
-            lat = float(value[1])
+            lon = float(
+                value[0]
+            )
+
+            lat = float(
+                value[1]
+            )
 
             if (
                 -90 <= lat <= 90
-                and -180 <= lon <= 180
+                and
+                -180 <= lon <= 180
             ):
+
                 result.append(
-                    (lat, lon)
+                    (
+                        lat,
+                        lon
+                    )
                 )
 
         else:
@@ -324,7 +348,9 @@ def collect_coordinates(value, result):
                 )
 
 
-def representative_point(geometry):
+def representative_point(
+    geometry
+):
 
     if not geometry:
         return None
@@ -339,15 +365,23 @@ def representative_point(geometry):
     if not coordinates:
         return None
 
-    latitude = sum(
-        item[0]
-        for item in coordinates
-    ) / len(coordinates)
+    latitude = (
+        sum(
+            point[0]
+            for point in coordinates
+        )
+        /
+        len(coordinates)
+    )
 
-    longitude = sum(
-        item[1]
-        for item in coordinates
-    ) / len(coordinates)
+    longitude = (
+        sum(
+            point[1]
+            for point in coordinates
+        )
+        /
+        len(coordinates)
+    )
 
     return (
         latitude,
@@ -366,6 +400,7 @@ def normalize_text(value):
 
     value = value.lower()
 
+    # remove HTML
     value = re.sub(
         r"<[^>]+>",
         " ",
@@ -400,7 +435,9 @@ def official_text(alert):
 
 def is_relevant(alert):
 
-    text = official_text(alert)
+    text = official_text(
+        alert
+    )
 
     return any(
         word in text
@@ -419,10 +456,18 @@ def text_score(
 
     gdelt = normalize_text(
         " ".join([
-            gdelt_event.get("city") or "",
-            gdelt_event.get("region") or "",
-            gdelt_event.get("country") or "",
-            gdelt_event.get("source_domain") or "",
+            gdelt_event.get(
+                "city"
+            ) or "",
+            gdelt_event.get(
+                "region"
+            ) or "",
+            gdelt_event.get(
+                "country"
+            ) or "",
+            gdelt_event.get(
+                "source_domain"
+            ) or "",
         ])
     )
 
@@ -430,20 +475,25 @@ def text_score(
 
     # Country agreement
     official_country = normalize_text(
-        official_alert.get("country")
+        official_alert.get(
+            "country"
+        )
     )
 
     gdelt_country = normalize_text(
-        gdelt_event.get("country")
+        gdelt_event.get(
+            "country"
+        )
     )
 
     if (
         official_country
-        and official_country == gdelt_country
+        and
+        official_country == gdelt_country
     ):
         score += 20
 
-    # Region/location terms
+    # Location/region words
     tokens = set(
         re.findall(
             r"\b[a-zA-ZÀ-ÿ]{4,}\b",
@@ -466,11 +516,11 @@ def text_score(
 
 
 # ============================================================
-# MATCH
+# START
 # ============================================================
 
 print("=" * 78)
-print("EUROPE CONFLICT RADAR MATCHER v0.1")
+print("EUROPE CONFLICT RADAR MATCHER v0.2")
 print(
     "Execution:",
     datetime.now(
@@ -479,13 +529,16 @@ print(
 )
 print("=" * 78)
 
-# Official alerts currently stored.
+
+# ============================================================
+# LOAD DATA
+# ============================================================
+
 official_alerts = supabase_get(
     "official_alerts",
     "select=*"
 )
 
-# GDELT candidates.
 gdelt_events = supabase_get(
     "events",
     (
@@ -504,6 +557,11 @@ print(
     len(gdelt_events)
 )
 
+
+# ============================================================
+# FILTER OFFICIAL ALERTS
+# ============================================================
+
 relevant_official = [
     alert
     for alert in official_alerts
@@ -515,37 +573,58 @@ print(
     len(relevant_official)
 )
 
+
+# ============================================================
+# MATCHING
+# ============================================================
+
 matches_created = 0
 unmatched_created = 0
+already_recorded = 0
 
 for official in relevant_official:
 
     official_time = parse_time(
-        official.get("issued_at")
+        official.get(
+            "issued_at"
+        )
     )
 
     if official_time is None:
         continue
 
     official_point = representative_point(
-        official.get("geometry")
+        official.get(
+            "geometry"
+        )
     )
 
     candidates = []
 
     for gdelt in gdelt_events:
 
-        # Same country first.
+        # ----------------------------------------------------
+        # COUNTRY MUST MATCH
+        # ----------------------------------------------------
+
         if (
             normalize_text(
-                official.get("country")
+                official.get(
+                    "country"
+                )
             )
             !=
             normalize_text(
-                gdelt.get("country")
+                gdelt.get(
+                    "country"
+                )
             )
         ):
             continue
+
+        # ----------------------------------------------------
+        # GDELT TIME
+        # ----------------------------------------------------
 
         gdelt_time = parse_gdelt_time(
             gdelt.get(
@@ -561,17 +640,20 @@ for official in relevant_official:
             - official_time
         ).total_seconds() / 60
 
-        # Compare from 2h before official alert
-        # to 6h afterwards.
+        # Candidate window:
+        # 2 hours before official
+        # 6 hours after official
+
         if (
             latency < -120
-            or latency > 360
+            or
+            latency > 360
         ):
             continue
 
-        # ----------------------------------------
+        # ----------------------------------------------------
         # TIME SCORE
-        # ----------------------------------------
+        # ----------------------------------------------------
 
         abs_latency = abs(
             latency
@@ -592,17 +674,23 @@ for official in relevant_official:
         else:
             time_points = 5
 
-        # ----------------------------------------
-        # DISTANCE
-        # ----------------------------------------
+        # ----------------------------------------------------
+        # DISTANCE SCORE
+        # ----------------------------------------------------
 
         distance = None
         distance_points = 0
 
         if (
             official_point
-            and gdelt.get("latitude") is not None
-            and gdelt.get("longitude") is not None
+            and
+            gdelt.get(
+                "latitude"
+            ) is not None
+            and
+            gdelt.get(
+                "longitude"
+            ) is not None
         ):
 
             try:
@@ -611,10 +699,14 @@ for official in relevant_official:
                     official_point[0],
                     official_point[1],
                     float(
-                        gdelt["latitude"]
+                        gdelt[
+                            "latitude"
+                        ]
                     ),
                     float(
-                        gdelt["longitude"]
+                        gdelt[
+                            "longitude"
+                        ]
                     ),
                 )
 
@@ -633,9 +725,9 @@ for official in relevant_official:
             except Exception:
                 distance = None
 
-        # ----------------------------------------
-        # TEXT
-        # ----------------------------------------
+        # ----------------------------------------------------
+        # TEXT SCORE
+        # ----------------------------------------------------
 
         text_points = text_score(
             official,
@@ -644,8 +736,10 @@ for official in relevant_official:
 
         total_score = (
             time_points
-            + distance_points
-            + text_points
+            +
+            distance_points
+            +
+            text_points
         )
 
         candidates.append({
@@ -658,12 +752,18 @@ for official in relevant_official:
             "score": total_score,
         })
 
+    # Best score first
     candidates.sort(
-        key=lambda item: item["score"],
+        key=lambda item: item[
+            "score"
+        ],
         reverse=True
     )
 
-    # Keep best candidate only in v0.1.
+    # ========================================================
+    # CANDIDATE FOUND
+    # ========================================================
+
     if candidates:
 
         best = candidates[0]
@@ -687,69 +787,81 @@ for official in relevant_official:
             )
 
         payload = {
-            "official_alert_id": official["id"],
-            "gdelt_event_id": best["event"]["id"],
 
-            "official_country": official.get(
-                "country"
-            ),
+            "official_alert_id":
+                official["id"],
 
-            "official_time": official.get(
-                "issued_at"
-            ),
+            "gdelt_event_id":
+                best["event"]["id"],
 
-            "gdelt_time": (
+            "official_country":
+                official.get(
+                    "country"
+                ),
+
+            "official_time":
+                official.get(
+                    "issued_at"
+                ),
+
+            "gdelt_time":
                 best["event"].get(
                     "first_detected_at"
-                )
-            ),
+                ),
 
-            "latency_minutes": round(
-                best["latency"],
-                2
-            ),
-
-            "distance_km": (
+            "latency_minutes":
                 round(
-                    best["distance"],
+                    best["latency"],
                     2
-                )
-                if best["distance"] is not None
-                else None
-            ),
+                ),
 
-            "time_score": best[
-                "time_score"
-            ],
+            "distance_km":
+                (
+                    round(
+                        best["distance"],
+                        2
+                    )
+                    if best["distance"]
+                    is not None
+                    else None
+                ),
 
-            "distance_score": best[
-                "distance_score"
-            ],
+            "time_score":
+                best["time_score"],
 
-            "text_score": best[
-                "text_score"
-            ],
+            "distance_score":
+                best["distance_score"],
 
-            "match_score": best[
-                "score"
-            ],
+            "text_score":
+                best["text_score"],
 
-            "classification": classification,
+            "match_score":
+                best["score"],
 
-            "notes": (
-                "Experimental automatic match. "
-                "Not manually verified."
-            ),
+            "classification":
+                classification,
+
+            "notes":
+                (
+                    "Experimental automatic match. "
+                    "Not manually verified."
+                ),
         }
 
         try:
 
-            supabase_insert(
+            status = supabase_insert(
                 "event_matches",
                 payload
             )
 
-            matches_created += 1
+            if status in (
+                200,
+                201,
+                204
+            ):
+
+                matches_created += 1
 
             print()
             print(
@@ -757,6 +869,20 @@ for official in relevant_official:
                 "|",
                 official.get(
                     "headline"
+                )
+            )
+
+            print(
+                "Official:",
+                official.get(
+                    "issued_at"
+                )
+            )
+
+            print(
+                "GDELT:",
+                best["event"].get(
+                    "gdelt_date_added"
                 )
             )
 
@@ -788,6 +914,24 @@ for official in relevant_official:
                 best["score"]
             )
 
+            print(
+                "GDELT source:",
+                best["event"].get(
+                    "source_url"
+                )
+            )
+
+        except urllib.error.HTTPError as error:
+
+            print(
+                "MATCH INSERT ERROR:",
+                error.code,
+                error.read().decode(
+                    "utf-8",
+                    errors="replace"
+                )
+            )
+
         except Exception as error:
 
             print(
@@ -795,55 +939,133 @@ for official in relevant_official:
                 error
             )
 
+    # ========================================================
+    # NO GDELT CANDIDATE
+    # ========================================================
+
     else:
 
-        payload = {
-            "official_alert_id": official["id"],
+        # Check whether we already recorded
+        # a no_candidate result for this official alert.
 
-            "gdelt_event_id": None,
-
-            "official_country": official.get(
-                "country"
-            ),
-
-            "official_time": official.get(
-                "issued_at"
-            ),
-
-            "classification": (
-                "no_candidate"
-            ),
-
-            "notes": (
-                "No GDELT candidate found "
-                "within -120/+360 minutes."
-            ),
-        }
+        params = (
+            "select=id"
+            f"&official_alert_id=eq.{official['id']}"
+            "&gdelt_event_id=is.null"
+            "&limit=1"
+        )
 
         try:
 
-            supabase_insert(
+            existing = supabase_get(
                 "event_matches",
-                payload
+                params
             )
-
-            unmatched_created += 1
 
         except Exception as error:
 
             print(
-                "UNMATCHED INSERT ERROR:",
+                "NO-CANDIDATE LOOKUP ERROR:",
                 error
             )
 
+            continue
+
+        if existing:
+
+            already_recorded += 1
+            continue
+
+        payload = {
+
+            "official_alert_id":
+                official["id"],
+
+            "gdelt_event_id":
+                None,
+
+            "official_country":
+                official.get(
+                    "country"
+                ),
+
+            "official_time":
+                official.get(
+                    "issued_at"
+                ),
+
+            "gdelt_time":
+                None,
+
+            "latency_minutes":
+                None,
+
+            "distance_km":
+                None,
+
+            "time_score":
+                0,
+
+            "distance_score":
+                0,
+
+            "text_score":
+                0,
+
+            "match_score":
+                0,
+
+            "classification":
+                "no_candidate",
+
+            "notes":
+                (
+                    "No GDELT candidate found "
+                    "within -120/+360 minutes."
+                ),
+        }
+
+        try:
+
+            status = supabase_insert(
+                "event_matches",
+                payload
+            )
+
+            if status in (
+                200,
+                201,
+                204
+            ):
+
+                unmatched_created += 1
+
+        except urllib.error.HTTPError as error:
+
+            print(
+                "NO-CANDIDATE INSERT ERROR:",
+                error.code,
+                error.read().decode(
+                    "utf-8",
+                    errors="replace"
+                )
+            )
+
+        except Exception as error:
+
+            print(
+                "NO-CANDIDATE INSERT ERROR:",
+                error
+            )
+
+
+# ============================================================
+# SUMMARY
+# ============================================================
+
 print()
 print("=" * 78)
+
 print(
-    "MATCHES CREATED:",
+    "MATCHES ACCEPTED:",
     matches_created
-)
-print(
-    "NO-CANDIDATE RECORDS:",
-    unmatched_created
-)
-print("=" * 78)
