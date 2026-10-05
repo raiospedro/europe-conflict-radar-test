@@ -1065,7 +1065,46 @@ for official in relevant_official:
 
 print()
 print("=" * 78)
+print("MATCHER v0.2 SUMMARY")
+print("=" * 78)
+
+print(
+    "OFFICIAL ALERTS:",
+    len(official_alerts)
+)
+
+print(
+    "GDELT CANDIDATES:",
+    len(gdelt_events)
+)
+
+print(
+    "RELEVANT OFFICIAL ALERTS:",
+    len(relevant_official)
+)
 
 print(
     "MATCHES ACCEPTED:",
     matches_created
+)
+
+print(
+    "NO-CANDIDATES CREATED:",
+    unmatched_created
+)
+
+print(
+    "ALREADY RECORDED:",
+    already_recorded
+)
+
+print("=" * 78)
+
+print(
+    "MATCHER COMPLETED:",
+    datetime.now(
+        timezone.utc
+    ).isoformat()
+)
+
+print("=" * 78)
