@@ -98,21 +98,46 @@ def supabase_get(table, params=""):
 
 def supabase_insert(table, payload):
 
+    if table == "event_matches":
+
+        if payload.get("gdelt_event_id") is not None:
+            conflict = "official_alert_id,gdelt_event_id"
+        else:
+            conflict = None
+
+    else:
+        conflict = None
+
     url = f"{SUPABASE_URL}/rest/v1/{table}"
+
+    if conflict:
+        url += (
+            "?on_conflict="
+            + urllib.parse.quote(
+                conflict,
+                safe=","
+            )
+        )
+
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    if conflict:
+        headers["Prefer"] = (
+            "resolution=ignore-duplicates,"
+            "return=minimal"
+        )
+    else:
+        headers["Prefer"] = "return=minimal"
 
     request = urllib.request.Request(
         url,
         data=json.dumps(payload).encode("utf-8"),
         method="POST",
-        headers={
-            "apikey": SUPABASE_KEY,
-            "Authorization": f"Bearer {SUPABASE_KEY}",
-            "Content-Type": "application/json",
-            "Prefer": (
-                "resolution=ignore-duplicates,"
-                "return=minimal"
-            ),
-        },
+        headers=headers,
     )
 
     with urllib.request.urlopen(
@@ -121,7 +146,6 @@ def supabase_insert(table, payload):
     ) as response:
 
         return response.status
-
 
 # ============================================================
 # TIME
