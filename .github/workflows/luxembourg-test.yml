@@ -1,11 +1,15 @@
-name: Luxembourg LU-Alert Test
+name: Luxembourg LU-Alert
 
 on:
   workflow_dispatch:
 
+  schedule:
+    - cron: "7,22,37,52 * * * *"
+
 jobs:
-  luxembourg-test:
+  luxembourg-alerts:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
       - name: Get repository
@@ -16,5 +20,8 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Test Luxembourg LU-Alert
+      - name: Collect Luxembourg LU-Alert
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
         run: python luxembourg.py
