@@ -3,9 +3,9 @@ from datetime import datetime, timezone
 
 SUPABASE_URL=os.environ["SUPABASE_URL"].rstrip("/")
 SUPABASE_KEY=os.environ["SUPABASE_SECRET_KEY"]
-UA="EuropeConflictRadar-Matcher/0.3"
+UA="EuropeConflictRadar-Matcher/0.4"
 
-RELEVANT={"explosion","explosive","bomb","bombing","missile","rocket","drone","air raid","airstrike","air strike","attack","armed","shooting","terror","terrorism","terrorist","evacuation","chemical","radiological","nuclear","ammunition","munition","military","artillery","shelling","war","large scale fire","major fire","world war bomb","bombe","bomben","bombenentscharfung","anschlag","terrorismus","evakuierung","grossbrand","sprengstoff","attentat","attaque","incendie majeur","incendie important"}
+RELEVANT={"explosion","explosive","bomb","bombing","missile","rocket","drone","air raid","airstrike","air strike","attack","armed","shooting","terror","terrorism","terrorist","evacuation","chemical","radiological","nuclear","ammunition","munition","artillery","shelling","large scale fire","major fire","world war bomb","bombe","bomben","bombenentscharfung","anschlag","terrorismus","evakuierung","grossbrand","sprengstoff","attentat","attaque","incendie majeur","incendie important"}
 TEST={"test","testing","exercise","drill","probealarm","ubung","uebung","essai","exercice"}
 CONCEPTS={
 "bomb":{"bomb","bombing","bombe","bomben","bombenentscharfung","munition","ammunition","explosive","sprengstoff","world war bomb"},
@@ -17,7 +17,7 @@ CONCEPTS={
 "evacuation":{"evacuation","evacuate","evacuated","evakuierung"},
 "fire":{"large scale fire","major fire","grossbrand","incendie majeur","incendie important"},
 "chemical":{"chemical","hazardous substance","toxic","radiological","nuclear"},
-"military":{"military","armed forces","troops","artillery","war"}}
+"military":{"artillery","shelling"}}
 STOP={"alert","warning","official","update","cancel","cancelled","public","immediate","unknown","actual","germany","luxembourg","united","kingdom","city","district","area","region","state","from","with","this","that","into","near","over","under","after","before","during","large","scale"}
 
 def norm(v):
@@ -85,12 +85,12 @@ def semantic(a,e):
     ot,gt=otext(a),gtext(e); cc=concepts(ot)&concepts(gt); ct=tokens(ot)&tokens(gt)
     lt=tokens(norm((a.get("area_description") or "")+" "+(a.get("headline") or ""))); cl=lt&tokens(gt)
     score=(40 if cc else 0)+min(len(cl)*15,30)+min(len(ct-cl)*5,15)
-    return score,bool(cc or cl),sorted(cc),sorted(cl)
+    return score,bool(cc),sorted(cc),sorted(cl)
 
 def no_candidate_exists(i):
     return bool(get("event_matches",f"select=id&official_alert_id=eq.{i}&gdelt_event_id=is.null&limit=1"))
 
-print("="*78); print("EUROPE CONFLICT RADAR MATCHER v0.3"); print("Execution:",datetime.now(timezone.utc).isoformat()); print("="*78)
+print("="*78); print("EUROPE CONFLICT RADAR MATCHER v0.4"); print("Execution:",datetime.now(timezone.utc).isoformat()); print("="*78)
 official=get("official_alerts","select=*"); events=get("events","select=*&event_type=eq.gdelt_candidate")
 rel=[a for a in official if not is_test(a) and relevant(a)]
 print("Official alerts:",len(official)); print("GDELT candidates:",len(events)); print("Relevant official alerts:",len(rel)); print("Test/exercise alerts excluded:",sum(is_test(a) for a in official))
@@ -121,30 +121,41 @@ for a in rel:
 
     classification=None; best=valid[0] if valid else None
     if best:
-        if best[0]>=75 and (best[3] is None or best[3]<=100):classification="probable_match"; probable+=1
-        elif best[0]>=55:classification="possible_match"; possible+=1
+        same_concept = bool(best[7])
+        same_location = bool(best[8])
+        close_25 = best[3] is not None and best[3] <= 25
+        within_100 = best[3] is None or best[3] <= 100
 
-    print("\n"+"-"*78); print("OFFICIAL:",a.get("headline"))
+        if best[0] >= 75 and within_100 and same_concept and (same_location or close_25):
+            classification="probable_match"; probable+=1
+        elif best[0] >= 60 and same_concept and within_100 and (same_location or close_25):
+            classification="possible_match"; possible+=1
+
+    print("\n"+"-"*78)
+    print("OFFICIAL:",a.get("headline"))
+    print("OFFICIAL CONCEPTS:",sorted(concepts(otext(a))))
+    print("COUNTRY:",a.get("country"))
+    print("OFFICIAL TIME:",a.get("issued_at"))
     if classification:
         score,e,latency,distance,ts,ds,ss,cc,cl=best
-        payload={"official_alert_id":a["id"],"gdelt_event_id":e["id"],"official_country":a.get("country"),"official_time":a.get("issued_at"),"gdelt_time":e.get("first_detected_at"),"latency_minutes":round(latency,2),"distance_km":round(distance,2) if distance is not None else None,"time_score":ts,"distance_score":ds,"text_score":ss,"match_score":score,"classification":classification,"notes":f"Matcher v0.3; concepts={cc}; locations={cl}; manual validation required."}
+        payload={"official_alert_id":a["id"],"gdelt_event_id":e["id"],"official_country":a.get("country"),"official_time":a.get("issued_at"),"gdelt_time":e.get("first_detected_at"),"latency_minutes":round(latency,2),"distance_km":round(distance,2) if distance is not None else None,"time_score":ts,"distance_score":ds,"text_score":ss,"match_score":score,"classification":classification,"notes":f"Matcher v0.4 conservative; concepts={cc}; locations={cl}; manual validation required."}
         try:
             if insert(payload) in (200,201,204):accepted+=1
             print("RESULT:",classification.upper()); print("Score:",score); print("Latency:",round(latency,1),"minutes"); print("Distance:",round(distance,1) if distance is not None else "unknown","km"); print("Common concepts:",cc); print("Common locations:",cl); print("GDELT source:",e.get("source_url"))
         except Exception as ex:print("MATCH INSERT ERROR:",ex)
     else:
-        print("RESULT: NO VALID MATCH")
+        print("RESULT: NO VALID MATCH"); print("REASON: no candidate passed same-concept + geography/time gates")
         if best:print("Best rejected score:",best[0])
         try:
             if no_candidate_exists(a["id"]): existing+=1
             else:
-                payload={"official_alert_id":a["id"],"gdelt_event_id":None,"official_country":a.get("country"),"official_time":a.get("issued_at"),"classification":"no_candidate","match_score":0,"notes":"Matcher v0.3: no candidate passed conservative semantic/geographic rules."}
+                payload={"official_alert_id":a["id"],"gdelt_event_id":None,"official_country":a.get("country"),"official_time":a.get("issued_at"),"classification":"no_candidate","match_score":0,"notes":"Matcher v0.4: no candidate passed same-concept + geographic/time rules."}
                 if insert(payload) in (200,201,204):no_new+=1
         except Exception as ex:print("NO-CANDIDATE ERROR:",ex)
 
-print("\n"+"="*78); print("MATCHER v0.3 SUMMARY"); print("="*78)
+print("\n"+"="*78); print("MATCHER v0.4 SUMMARY"); print("="*78)
 print("OFFICIAL ALERTS:",len(official)); print("GDELT CANDIDATES:",len(events)); print("RELEVANT OFFICIAL ALERTS:",len(rel))
 print("PROBABLE MATCHES:",probable); print("POSSIBLE MATCHES:",possible); print("MATCHES ACCEPTED:",accepted)
 print("NO-CANDIDATES CREATED:",no_new); print("ALREADY RECORDED:",existing)
 print("REJECTED BY TIME:",rej_time); print("REJECTED BY DISTANCE:",rej_dist); print("REJECTED BY SEMANTICS:",rej_sem)
-print("MATCHER v0.3 COMPLETED:",datetime.now(timezone.utc).isoformat()); print("="*78)
+print("MATCHER v0.4 COMPLETED:",datetime.now(timezone.utc).isoformat()); print("="*78)
