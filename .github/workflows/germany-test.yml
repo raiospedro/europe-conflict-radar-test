@@ -1,11 +1,15 @@
-name: Germany Official Alerts Test
+name: Germany Official Alerts
 
 on:
   workflow_dispatch:
 
+  schedule:
+    - cron: "5,20,35,50 * * * *"
+
 jobs:
-  germany-test:
+  germany-alerts:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
       - name: Get repository
@@ -16,5 +20,8 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Test Germany NINA alerts
+      - name: Collect Germany official alerts
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
         run: python germany.py
