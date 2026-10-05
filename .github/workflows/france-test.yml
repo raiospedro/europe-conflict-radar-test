@@ -16,5 +16,8 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install certificate bundle
+        run: pip install certifi
+
       - name: Probe FR-Alert
         run: python france_probe.py
