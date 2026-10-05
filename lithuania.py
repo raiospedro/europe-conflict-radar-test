@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 
 URL = (
     "https://get.data.gov.lt/"
-    "datasets/gov/pagd/pranesimai/:all/:format/json"
+    "datasets/gov/pagd/pranesimai/Pranesimas"
 )
 
 print("=" * 70)
