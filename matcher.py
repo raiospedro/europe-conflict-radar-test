@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 
 SUPABASE_URL=os.environ["SUPABASE_URL"].rstrip("/")
 SUPABASE_KEY=os.environ["SUPABASE_SECRET_KEY"]
-UA="EuropeConflictRadar-Matcher/0.4"
+UA="EuropeConflictRadar-Matcher/0.5"
 
 RELEVANT={"explosion","explosive","bomb","bombing","missile","rocket","drone","air raid","airstrike","air strike","attack","armed","shooting","terror","terrorism","terrorist","evacuation","chemical","radiological","nuclear","ammunition","munition","artillery","shelling","large scale fire","major fire","world war bomb","bombe","bomben","bombenentscharfung","anschlag","terrorismus","evakuierung","grossbrand","sprengstoff","attentat","attaque","incendie majeur","incendie important"}
 TEST={"test","testing","exercise","drill","probealarm","ubung","uebung","essai","exercice"}
@@ -37,6 +37,22 @@ def get(table,params=""):
     u=f"{SUPABASE_URL}/rest/v1/{table}"+(("?"+params) if params else "")
     r=urllib.request.Request(u,headers={"apikey":SUPABASE_KEY,"Authorization":f"Bearer {SUPABASE_KEY}","User-Agent":UA})
     with urllib.request.urlopen(r,timeout=30) as x:return json.loads(x.read().decode())
+
+def get_all_gdelt_candidates(page_size=1000):
+    """Fetch every current GDELT candidate using PostgREST offset pagination."""
+    rows=[]
+    offset=0
+    while True:
+        batch=get(
+            "events",
+            f"select=*&event_type=eq.gdelt_candidate&order=id.asc&limit={page_size}&offset={offset}"
+        )
+        rows.extend(batch)
+        print(f"GDELT page offset {offset}: {len(batch)} rows")
+        if len(batch) < page_size:
+            break
+        offset += page_size
+    return rows
 
 def insert(payload):
     u=f"{SUPABASE_URL}/rest/v1/event_matches"
@@ -90,8 +106,8 @@ def semantic(a,e):
 def no_candidate_exists(i):
     return bool(get("event_matches",f"select=id&official_alert_id=eq.{i}&gdelt_event_id=is.null&limit=1"))
 
-print("="*78); print("EUROPE CONFLICT RADAR MATCHER v0.4"); print("Execution:",datetime.now(timezone.utc).isoformat()); print("="*78)
-official=get("official_alerts","select=*"); events=get("events","select=*&event_type=eq.gdelt_candidate")
+print("="*78); print("EUROPE CONFLICT RADAR MATCHER v0.5"); print("Execution:",datetime.now(timezone.utc).isoformat()); print("="*78)
+official=get("official_alerts","select=*"); events=get_all_gdelt_candidates()
 rel=[a for a in official if not is_test(a) and relevant(a)]
 print("Official alerts:",len(official)); print("GDELT candidates:",len(events)); print("Relevant official alerts:",len(rel)); print("Test/exercise alerts excluded:",sum(is_test(a) for a in official))
 
@@ -138,10 +154,14 @@ for a in rel:
     print("OFFICIAL TIME:",a.get("issued_at"))
     if classification:
         score,e,latency,distance,ts,ds,ss,cc,cl=best
-        payload={"official_alert_id":a["id"],"gdelt_event_id":e["id"],"official_country":a.get("country"),"official_time":a.get("issued_at"),"gdelt_time":e.get("first_detected_at"),"latency_minutes":round(latency,2),"distance_km":round(distance,2) if distance is not None else None,"time_score":ts,"distance_score":ds,"text_score":ss,"match_score":score,"classification":classification,"notes":f"Matcher v0.4 conservative; concepts={cc}; locations={cl}; manual validation required."}
+        payload={"official_alert_id":a["id"],"gdelt_event_id":e["id"],"official_country":a.get("country"),"official_time":a.get("issued_at"),"gdelt_time":e.get("first_detected_at"),"latency_minutes":round(latency,2),"distance_km":round(distance,2) if distance is not None else None,"time_score":ts,"distance_score":ds,"text_score":ss,"match_score":score,"classification":classification,"notes":f"Matcher v0.5 conservative; concepts={cc}; locations={cl}; manual validation required."}
         try:
             if insert(payload) in (200,201,204):accepted+=1
-            print("RESULT:",classification.upper()); print("Score:",score); print("Latency:",round(latency,1),"minutes"); print("Distance:",round(distance,1) if distance is not None else "unknown","km"); print("Common concepts:",cc); print("Common locations:",cl); print("GDELT source:",e.get("source_url"))
+            print("RESULT:",classification.upper()); print("Score:",score)
+            print("GDELT LATENCY:",round(latency,1),"minutes")
+            print("RADAR LATENCY:",round(radar_latency,1) if radar_latency is not None else "unknown","minutes")
+            print("OUR OVERHEAD:",round(overhead,1) if overhead is not None else "unknown","minutes")
+            print("Distance:",round(distance,1) if distance is not None else "unknown","km"); print("Common concepts:",cc); print("Common locations:",cl); print("GDELT source:",e.get("source_url"))
         except Exception as ex:print("MATCH INSERT ERROR:",ex)
     else:
         print("RESULT: NO VALID MATCH"); print("REASON: no candidate passed same-concept + geography/time gates")
@@ -149,13 +169,13 @@ for a in rel:
         try:
             if no_candidate_exists(a["id"]): existing+=1
             else:
-                payload={"official_alert_id":a["id"],"gdelt_event_id":None,"official_country":a.get("country"),"official_time":a.get("issued_at"),"classification":"no_candidate","match_score":0,"notes":"Matcher v0.4: no candidate passed same-concept + geographic/time rules."}
+                payload={"official_alert_id":a["id"],"gdelt_event_id":None,"official_country":a.get("country"),"official_time":a.get("issued_at"),"classification":"no_candidate","match_score":0,"notes":"Matcher v0.5: no candidate passed same-concept + geographic/time rules."}
                 if insert(payload) in (200,201,204):no_new+=1
         except Exception as ex:print("NO-CANDIDATE ERROR:",ex)
 
-print("\n"+"="*78); print("MATCHER v0.4 SUMMARY"); print("="*78)
+print("\n"+"="*78); print("MATCHER v0.5 SUMMARY"); print("="*78)
 print("OFFICIAL ALERTS:",len(official)); print("GDELT CANDIDATES:",len(events)); print("RELEVANT OFFICIAL ALERTS:",len(rel))
 print("PROBABLE MATCHES:",probable); print("POSSIBLE MATCHES:",possible); print("MATCHES ACCEPTED:",accepted)
 print("NO-CANDIDATES CREATED:",no_new); print("ALREADY RECORDED:",existing)
 print("REJECTED BY TIME:",rej_time); print("REJECTED BY DISTANCE:",rej_dist); print("REJECTED BY SEMANTICS:",rej_sem)
-print("MATCHER v0.4 COMPLETED:",datetime.now(timezone.utc).isoformat()); print("="*78)
+print("MATCHER v0.5 COMPLETED:",datetime.now(timezone.utc).isoformat()); print("="*78)
