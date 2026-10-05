@@ -1,4 +1,6 @@
 import json
+import os
+import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
@@ -8,12 +10,10 @@ DATASET_API = (
     "alertes-du-systeme-lu-alert/"
 )
 
-USER_AGENT = "EuropeConflictRadar-Luxembourg/0.2"
+SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
+SUPABASE_KEY = os.environ["SUPABASE_SECRET_KEY"]
 
-print("=" * 76)
-print("LUXEMBOURG LU-ALERT OFFICIAL DATA TEST v0.2")
-print("Execution:", datetime.now(timezone.utc).isoformat())
-print("=" * 76)
+USER_AGENT = "EuropeConflictRadar-Luxembourg/0.3"
 
 
 def download(url):
@@ -52,43 +52,53 @@ def parse_date(value):
         )
 
 
-# ============================================================
-# 1. DATASET
-# ============================================================
+def supabase_insert(payload):
 
-print("\n[1/3] Downloading dataset metadata...")
+    endpoint = (
+        f"{SUPABASE_URL}/rest/v1/"
+        "official_alerts?on_conflict=external_id"
+    )
 
-raw = download(DATASET_API)
+    request = urllib.request.Request(
+        endpoint,
+        data=json.dumps(payload).encode("utf-8"),
+        method="POST",
+        headers={
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "Content-Type": "application/json",
+            "Prefer": (
+                "resolution=ignore-duplicates,"
+                "return=minimal"
+            ),
+        },
+    )
+
+    with urllib.request.urlopen(
+        request,
+        timeout=30
+    ) as response:
+
+        return response.status
+
+
+print("=" * 76)
+print("LUXEMBOURG LU-ALERT COLLECTOR")
+print("Execution:", datetime.now(timezone.utc).isoformat())
+print("=" * 76)
+
+# ============================================================
+# DATASET METADATA
+# ============================================================
 
 dataset = json.loads(
-    raw.decode("utf-8")
-)
-
-print(
-    "Dataset:",
-    dataset.get("title")
-)
-
-print(
-    "Dataset last modified:",
-    dataset.get("last_modified")
+    download(DATASET_API).decode("utf-8")
 )
 
 resources = dataset.get(
     "resources",
     []
 )
-
-print(
-    "Total resources:",
-    len(resources)
-)
-
-# ============================================================
-# 2. XML RESOURCES
-# ============================================================
-
-print("\n[2/3] Finding CAP-LU XML resources...")
 
 xml_resources = []
 
@@ -108,7 +118,6 @@ for resource in resources:
         fmt == "xml"
         or url.lower().endswith(".xml")
     ):
-
         xml_resources.append(
             resource
         )
@@ -116,16 +125,19 @@ for resource in resources:
 
 def resource_datetime(resource):
 
-    values = [
-        resource.get("last_modified"),
-        resource.get("created_at"),
-    ]
+    dates = []
 
-    dates = [
-        parse_date(value)
-        for value in values
-        if value
-    ]
+    for field in (
+        "last_modified",
+        "created_at"
+    ):
+
+        value = resource.get(field)
+
+        if value:
+            dates.append(
+                parse_date(value)
+            )
 
     if not dates:
         return datetime.min.replace(
@@ -141,374 +153,378 @@ xml_resources.sort(
 )
 
 print(
-    "XML resources:",
+    "Total CAP-LU resources:",
     len(xml_resources)
 )
 
-print()
-print("10 MOST RECENT XML RESOURCES")
-print("-" * 76)
+# Para o primeiro carregamento:
+# últimos 50 recursos.
+#
+# Depois os IDs UNIQUE impedem duplicados.
 
-for resource in xml_resources[:10]:
+resources_to_process = xml_resources[:50]
 
-    print()
-    print(
-        resource.get("title")
-        or resource.get("url")
-    )
+accepted = 0
+failed = 0
+parsed = 0
 
-    print(
-        "Created:",
-        resource.get("created_at")
-    )
-
-    print(
-        "Modified:",
-        resource.get("last_modified")
-    )
-
-    print(
-        "URL:",
-        resource.get("url")
-    )
-
-# ============================================================
-# 3. PARSE LATEST XML
-# ============================================================
-
-if not xml_resources:
-
-    raise RuntimeError(
-        "No XML resources found."
-    )
-
-latest = xml_resources[0]
-
-latest_url = latest.get("url")
-
-print()
-print("=" * 76)
-print("[3/3] PARSING LATEST CAP-LU")
-print("=" * 76)
-
-print(
-    "Resource created:",
-    latest.get("created_at")
-)
-
-print(
-    "Resource modified:",
-    latest.get("last_modified")
-)
-
-print(
-    "URL:",
-    latest_url
-)
-
-xml_raw = download(
-    latest_url
-)
-
-print(
-    "Downloaded bytes:",
-    len(xml_raw)
-)
-
-root = ET.fromstring(
-    xml_raw
-)
-
-print(
-    "Root tag:",
-    root.tag
-)
-
-# ------------------------------------------------------------
-# Descobrir namespace REAL diretamente do XML
-# ------------------------------------------------------------
-
-if root.tag.startswith("{"):
-
-    namespace_uri = (
-        root.tag
-        .split("}")[0]
-        .strip("{")
-    )
-
-else:
-    namespace_uri = ""
-
-print(
-    "Detected namespace:",
-    namespace_uri
-)
-
-
-def tag(name):
-
-    if namespace_uri:
-        return f"{{{namespace_uri}}}{name}"
-
-    return name
-
-
-def child_text(
-    element,
-    name
+for resource in reversed(
+    resources_to_process
 ):
 
-    if element is None:
-        return None
+    url = resource.get("url")
 
-    found = element.find(
-        tag(name)
-    )
+    try:
 
-    if found is None:
-        return None
+        xml_raw = download(url)
 
-    return found.text
-
-
-# ------------------------------------------------------------
-# CAP ALERT
-# ------------------------------------------------------------
-
-alerts = []
-
-if root.tag.endswith("alert"):
-
-    alerts = [root]
-
-else:
-
-    alerts = root.findall(
-        f".//{tag('alert')}"
-    )
-
-print(
-    "CAP alerts found:",
-    len(alerts)
-)
-
-for number, alert in enumerate(
-    alerts[:20],
-    start=1
-):
-
-    print()
-    print("-" * 76)
-    print(
-        "ALERT",
-        number
-    )
-
-    print(
-        "Identifier:",
-        child_text(
-            alert,
-            "identifier"
+        root = ET.fromstring(
+            xml_raw
         )
-    )
 
-    print(
-        "Sender:",
-        child_text(
-            alert,
-            "sender"
+    except Exception as error:
+
+        print(
+            "XML ERROR:",
+            url,
+            error
         )
-    )
 
-    print(
-        "Sent:",
-        child_text(
-            alert,
-            "sent"
+        failed += 1
+        continue
+
+    # Namespace CAP-LU real
+    if root.tag.startswith("{"):
+
+        namespace_uri = (
+            root.tag
+            .split("}")[0]
+            .strip("{")
         )
-    )
 
-    print(
-        "Status:",
-        child_text(
-            alert,
-            "status"
+    else:
+        namespace_uri = ""
+
+    def tag(name):
+
+        if namespace_uri:
+            return (
+                f"{{{namespace_uri}}}{name}"
+            )
+
+        return name
+
+    def text(element, name):
+
+        if element is None:
+            return None
+
+        found = element.find(
+            tag(name)
         )
+
+        if found is None:
+            return None
+
+        return found.text
+
+    identifier = text(
+        root,
+        "identifier"
     )
 
-    print(
-        "Message type:",
-        child_text(
-            alert,
-            "msgType"
-        )
+    if not identifier:
+        continue
+
+    parsed += 1
+
+    sender = text(
+        root,
+        "sender"
     )
 
-    print(
-        "Scope:",
-        child_text(
-            alert,
-            "scope"
-        )
+    sent = text(
+        root,
+        "sent"
     )
 
-    infos = alert.findall(
+    cap_status = text(
+        root,
+        "status"
+    )
+
+    msg_type = text(
+        root,
+        "msgType"
+    )
+
+    # ========================================================
+    # ESCOLHER INFO
+    #
+    # Preferimos inglês.
+    # Se não existir: francês.
+    # Depois: primeiro disponível.
+    # ========================================================
+
+    infos = root.findall(
         tag("info")
     )
 
-    print(
-        "Info blocks:",
-        len(infos)
+    selected_info = None
+
+    for info in infos:
+
+        language = (
+            text(info, "language")
+            or ""
+        ).lower()
+
+        if language.startswith("en"):
+            selected_info = info
+            break
+
+    if selected_info is None:
+
+        for info in infos:
+
+            language = (
+                text(info, "language")
+                or ""
+            ).lower()
+
+            if language.startswith("fr"):
+                selected_info = info
+                break
+
+    if (
+        selected_info is None
+        and infos
+    ):
+        selected_info = infos[0]
+
+    if selected_info is None:
+        continue
+
+    language = text(
+        selected_info,
+        "language"
     )
 
-    for info_number, info in enumerate(
-        infos,
-        start=1
-    ):
+    category = text(
+        selected_info,
+        "category"
+    )
 
-        print()
-        print(
-            f"  INFO {info_number}"
+    event = text(
+        selected_info,
+        "event"
+    )
+
+    urgency = text(
+        selected_info,
+        "urgency"
+    )
+
+    severity = text(
+        selected_info,
+        "severity"
+    )
+
+    certainty = text(
+        selected_info,
+        "certainty"
+    )
+
+    effective = text(
+        selected_info,
+        "effective"
+    )
+
+    expires = text(
+        selected_info,
+        "expires"
+    )
+
+    headline = text(
+        selected_info,
+        "headline"
+    )
+
+    description = text(
+        selected_info,
+        "description"
+    )
+
+    instruction = text(
+        selected_info,
+        "instruction"
+    )
+
+    # ========================================================
+    # ÁREAS / POLÍGONOS
+    # ========================================================
+
+    area_descriptions = []
+    polygons = []
+    circles = []
+
+    areas = selected_info.findall(
+        tag("area")
+    )
+
+    for area in areas:
+
+        area_description = text(
+            area,
+            "areaDesc"
         )
 
-        print(
-            "  Language:",
-            child_text(
-                info,
-                "language"
+        if area_description:
+            area_descriptions.append(
+                area_description
             )
-        )
 
-        print(
-            "  Category:",
-            child_text(
-                info,
-                "category"
-            )
-        )
-
-        print(
-            "  Event:",
-            child_text(
-                info,
-                "event"
-            )
-        )
-
-        print(
-            "  Urgency:",
-            child_text(
-                info,
-                "urgency"
-            )
-        )
-
-        print(
-            "  Severity:",
-            child_text(
-                info,
-                "severity"
-            )
-        )
-
-        print(
-            "  Certainty:",
-            child_text(
-                info,
-                "certainty"
-            )
-        )
-
-        print(
-            "  Effective:",
-            child_text(
-                info,
-                "effective"
-            )
-        )
-
-        print(
-            "  Expires:",
-            child_text(
-                info,
-                "expires"
-            )
-        )
-
-        print(
-            "  Headline:",
-            child_text(
-                info,
-                "headline"
-            )
-        )
-
-        print(
-            "  Description:",
-            child_text(
-                info,
-                "description"
-            )
-        )
-
-        print(
-            "  Instruction:",
-            child_text(
-                info,
-                "instruction"
-            )
-        )
-
-        areas = info.findall(
-            tag("area")
-        )
-
-        print(
-            "  Areas:",
-            len(areas)
-        )
-
-        for area_number, area in enumerate(
-            areas,
-            start=1
+        for polygon in area.findall(
+            tag("polygon")
         ):
 
-            print(
-                f"    AREA {area_number}:",
-                child_text(
-                    area,
-                    "areaDesc"
+            if polygon.text:
+                polygons.append(
+                    polygon.text
                 )
-            )
 
-            polygons = area.findall(
-                tag("polygon")
-            )
+        for circle in area.findall(
+            tag("circle")
+        ):
 
-            circles = area.findall(
-                tag("circle")
-            )
-
-            print(
-                "    Polygons:",
-                len(polygons)
-            )
-
-            print(
-                "    Circles:",
-                len(circles)
-            )
-
-            for polygon in polygons[:2]:
-
-                value = polygon.text or ""
-
-                print(
-                    "    Polygon sample:",
-                    value[:300]
+            if circle.text:
+                circles.append(
+                    circle.text
                 )
+
+    geometry = {
+        "polygons": polygons,
+        "circles": circles,
+    }
+
+    payload = {
+
+        "country": "Luxembourg",
+
+        "authority": (
+            f"LU-Alert / {sender}"
+            if sender
+            else "LU-Alert"
+        ),
+
+        "external_id": identifier,
+
+        "alert_type": msg_type,
+        "status": cap_status,
+
+        "region": None,
+
+        "area_description": (
+            " | ".join(
+                area_descriptions
+            )
+            if area_descriptions
+            else None
+        ),
+
+        "issued_at": sent,
+
+        "expires_at": expires,
+
+        "headline": (
+            headline
+            or event
+        ),
+
+        "description": description,
+
+        "source_url": url,
+
+        "source_type": (
+            "official_CAP_LU"
+        ),
+
+        "severity": severity,
+
+        "urgency": urgency,
+
+        "event_code": event,
+
+        "geometry": geometry,
+
+        "raw_data": {
+            "sender": sender,
+            "status": cap_status,
+            "msg_type": msg_type,
+            "scope": text(
+                root,
+                "scope"
+            ),
+            "language": language,
+            "category": category,
+            "event": event,
+            "certainty": certainty,
+            "effective": effective,
+            "instruction": instruction,
+            "resource_created": (
+                resource.get(
+                    "created_at"
+                )
+            ),
+            "resource_modified": (
+                resource.get(
+                    "last_modified"
+                )
+            ),
+        },
+    }
+
+    try:
+
+        status_code = supabase_insert(
+            payload
+        )
+
+        if status_code in (
+            200,
+            201,
+            204
+        ):
+
+            accepted += 1
+
+            print(
+                "OK",
+                sent,
+                msg_type,
+                event,
+                "|",
+                headline,
+            )
+
+    except urllib.error.HTTPError as error:
+
+        failed += 1
+
+        print(
+            "SUPABASE ERROR",
+            identifier,
+            error.code,
+            error.read().decode(
+                "utf-8",
+                errors="replace"
+            ),
+        )
 
 print()
 print("=" * 76)
-print("LUXEMBOURG TEST v0.2 COMPLETED")
+print("RESOURCES CHECKED:", len(resources_to_process))
+print("CAP ALERTS PARSED:", parsed)
+print("SUPABASE ACCEPTED:", accepted)
+print("FAILED:", failed)
 print("=" * 76)
