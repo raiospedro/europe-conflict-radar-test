@@ -1,0 +1,24 @@
+
+name: Ukraine Alarm API Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  ukraine-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Get repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Test Ukraine Alarm API
+        env:
+          UKRAINE_ALARM_API_KEY: ${{ secrets.UKRAINE_ALARM_API_KEY }}
+        run: python ukraine_probe.py
