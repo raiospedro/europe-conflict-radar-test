@@ -4,6 +4,13 @@ name: Ukraine Official Alerts
 on:
   workflow_dispatch:
 
+  schedule:
+    - cron: "10,25,40,55 * * * *"
+
+concurrency:
+  group: ukraine-official-alerts
+  cancel-in-progress: false
+
 jobs:
   ukraine-alerts:
     runs-on: ubuntu-latest
