@@ -1,0 +1,26 @@
+
+name: Ukraine Official Alerts
+
+on:
+  workflow_dispatch:
+
+jobs:
+  ukraine-alerts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Get repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Collect Ukraine alerts
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          UKRAINE_ALARM_API_KEY: ${{ secrets.UKRAINE_ALARM_API_KEY }}
+        run: python ukraine.py
