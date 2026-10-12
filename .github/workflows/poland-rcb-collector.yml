@@ -4,6 +4,9 @@ name: Poland RCB Collector
 on:
   workflow_dispatch:
 
+  schedule:
+    - cron: "13,28,43,58 * * * *"
+
 concurrency:
   group: poland-rcb-collector
   cancel-in-progress: false
