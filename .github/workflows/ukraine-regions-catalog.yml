@@ -1,3 +1,4 @@
+# Manual diagnostic; refresh Actions discovery without changing execution.
 name: Ukraine Regions Catalog Diagnostic
 
 # Aggregate-only. No response body, region ID/name or authentication header is logged or saved.
