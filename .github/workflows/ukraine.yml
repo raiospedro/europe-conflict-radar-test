@@ -4,7 +4,7 @@ name: Ukraine Official Alerts
 on:
   workflow_dispatch:
 
-    schedule:
+  schedule:
     - cron: "7,22,37,52 * * * *"
 
 concurrency:

@@ -1,0 +1,119 @@
+name: Ukraine Regions Catalog Diagnostic
+
+# Aggregate-only. No response body, region ID/name or authentication header is logged or saved.
+# No checkout, collector invocation, database credentials, or automatic trigger.
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ukraine-regions-catalog-diagnostic
+  cancel-in-progress: false
+
+jobs:
+  diagnostic:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Consultar e validar catálogo sem divulgar dados
+        shell: bash
+        env:
+          UKRAINE_ALARM_API_KEY: ${{ secrets.UKRAINE_ALARM_API_KEY }}
+        run: |
+          node <<'NODE'
+          'use strict';
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const MAX_BYTES = 20 * 1024 * 1024;
+          function validateCatalog(data) {
+            if (!data || Array.isArray(data) || !Array.isArray(data.states) || !data.states.length) throw new Error('schema');
+            const totals = { State: 0, District: 0, Community: 0 };
+            const rank = { State: 0, District: 1, Community: 2 };
+            const ids = new Set();
+            let edges = 0;
+            function visit(node, parentType, depth) {
+              if (!node || Array.isArray(node) || typeof node !== 'object' || depth > 2) throw new Error('schema');
+              if (typeof node.regionId !== 'string' || !node.regionId.trim() || node.regionId.length > 200 || ids.has(node.regionId)) throw new Error('schema');
+              if (typeof node.regionName !== 'string' || !node.regionName.trim() || node.regionName.length > 500) throw new Error('schema');
+              if (!Object.hasOwn(rank, node.regionType)) throw new Error('schema');
+              if (parentType === null ? node.regionType !== 'State' : rank[node.regionType] <= rank[parentType]) throw new Error('hierarchy');
+              const children = node.regionChildIds ?? [];
+              if (!Array.isArray(children)) throw new Error('schema');
+              ids.add(node.regionId);
+              if (ids.size > 20000) throw new Error('schema');
+              totals[node.regionType]++;
+              if (parentType !== null) edges++;
+              for (const child of children) visit(child, node.regionType, depth + 1);
+            }
+            for (const state of data.states) visit(state, null, 0);
+            return { totals, hierarchy_present: edges > 0 };
+          }
+          async function run(env = process.env, fetcher = fetch) {
+            const report = { result: 'not_started', http_status: null, totals: null, hierarchy_present: null };
+            let valid = false;
+            try {
+              const key = env.UKRAINE_ALARM_API_KEY;
+              if (!key || !key.trim()) { report.result = 'missing_secret'; return report; }
+              const response = await fetcher('https://api.ukrainealarm.com/api/v3/regions', {
+                method: 'GET', redirect: 'manual',
+                headers: { Authorization: key, Accept: 'application/json' },
+                signal: AbortSignal.timeout(30000),
+              });
+              report.http_status = response.status;
+              if (response.status !== 200) { report.result = 'http_error'; await response.body?.cancel(); return report; }
+              if (!/application\/(?:[\w.+-]+\+)?json/i.test(response.headers.get('content-type') || '')) {
+                report.result = 'unexpected_content_type'; await response.body?.cancel(); return report;
+              }
+              const parts = [];
+              let size = 0;
+              for await (const chunk of response.body) {
+                size += chunk.length;
+                if (size > MAX_BYTES) { report.result = 'response_too_large'; return report; }
+                parts.push(Buffer.from(chunk));
+              }
+              const raw = Buffer.concat(parts);
+              // Never persist a body which contains the request credential (including escaped JSON).
+              const text = raw.toString('utf8');
+              if (text.includes(key) || text.includes(JSON.stringify(key).slice(1, -1))) { report.result = 'unsafe_response'; return report; }
+              let data;
+              try { data = JSON.parse(text); } catch { report.result = 'invalid_json'; return report; }
+              try { Object.assign(report, validateCatalog(data)); } catch { report.result = 'invalid_schema_or_hierarchy'; return report; }
+              // Aggregate-only, even in private repositories. No response body is written.
+              report.result = 'ok_aggregate_only';
+              valid = true;
+              return report;
+            } catch {
+              // Never log exception messages, response bodies, headers, IDs, or region names.
+              report.result = 'request_or_storage_failed';
+              return report;
+            } finally {
+              const serialized = JSON.stringify(report, null, 2);
+              fs.writeFileSync(path.join(env.RUNNER_TEMP, 'ukraine-regions-diagnostic', 'report.json'), serialized, { mode: 0o600 });
+              console.log(serialized);
+              if (!valid) process.exitCode = 1;
+            }
+          }
+          module.exports = { validateCatalog, run };
+          if (require.main === module || module.id === '[stdin]') {
+            const directory = path.join(process.env.RUNNER_TEMP, 'ukraine-regions-diagnostic');
+            fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+            run().catch(() => { console.log('{"result":"diagnostic_failed"}'); process.exitCode = 1; });
+          }
+          NODE
+
+      - name: Guardar apenas relatório agregado
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ukraine-regions-report
+          path: ${{ runner.temp }}/ukraine-regions-diagnostic/report.json
+          retention-days: 1
+          if-no-files-found: ignore
+
+      - name: Limpar relatório temporário
+        if: always()
+        shell: bash
+        run: |
+          node -e "require('node:fs').rmSync(require('node:path').join(process.env.RUNNER_TEMP, 'ukraine-regions-diagnostic'), {recursive:true, force:true})"
