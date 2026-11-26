@@ -4,10 +4,7 @@ name: Ukraine Official Alerts
 on:
   workflow_dispatch:
 
-  schedule:
-    - cron: "7,22,37,52 * * * *"
-
-concurrency:
+ concurrency:
   group: ukraine-official-alerts
   cancel-in-progress: false
 
